@@ -49,7 +49,7 @@ public class WindowedStreamPartitionerTest {
     );
 
     private Cluster cluster = new Cluster("cluster", Collections.singletonList(Node.noNode()), infos,
-            Collections.<String>emptySet(), Collections.<String>emptySet());
+            Collections.emptySet(), Collections.emptySet());
 
     @Test
     public void testCopartitioning() {
@@ -72,6 +72,7 @@ public class WindowedStreamPartitionerTest {
                 final TimeWindow window = new TimeWindow(10 * w, 20 * w);
 
                 final Windowed<Integer> windowedKey = new Windowed<>(key, window);
+                @SuppressWarnings("deprecation")
                 final Integer actual = streamPartitioner.partition(topicName, windowedKey, value, infos.size());
 
                 assertEquals(expected, actual);

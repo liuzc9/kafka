@@ -28,6 +28,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import org.apache.kafka.test.TestSslUtils.SslConfigsBuilder;
+import org.apache.kafka.test.TestUtils;
 
 public class CertStores {
 
@@ -55,10 +56,6 @@ public class CertStores {
         this(server, commonName, new TestSslUtils.CertificateBuilder().sanDnsNames(sanHostName));
     }
 
-    public CertStores(boolean server, String commonName, InetAddress hostAddress) throws Exception {
-        this(server, commonName, new TestSslUtils.CertificateBuilder().sanIpAddress(hostAddress));
-    }
-
     private CertStores(boolean server, String commonName, TestSslUtils.CertificateBuilder certBuilder) throws Exception {
         this(server, commonName, "RSA", certBuilder, false);
     }
@@ -66,7 +63,7 @@ public class CertStores {
     private CertStores(boolean server, String commonName, String keyAlgorithm, TestSslUtils.CertificateBuilder certBuilder, boolean usePem) throws Exception {
         String name = server ? "server" : "client";
         Mode mode = server ? Mode.SERVER : Mode.CLIENT;
-        File truststoreFile = usePem ? null : File.createTempFile(name + "TS", ".jks");
+        File truststoreFile = usePem ? null : TestUtils.tempFile(name + "TS", ".jks");
         sslConfig = new SslConfigsBuilder(mode)
                 .useClientCert(!server)
                 .certAlias(name)
@@ -109,8 +106,8 @@ public class CertStores {
 
     public static class Builder {
         private final boolean isServer;
+        private final List<String> sanDns;
         private String cn;
-        private List<String> sanDns;
         private InetAddress sanIp;
         private String keyAlgorithm;
         private boolean usePem;

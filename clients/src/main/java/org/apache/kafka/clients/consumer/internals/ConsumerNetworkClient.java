@@ -20,6 +20,7 @@ import org.apache.kafka.clients.ClientRequest;
 import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.KafkaClient;
 import org.apache.kafka.clients.Metadata;
+import org.apache.kafka.clients.NetworkClientUtils;
 import org.apache.kafka.clients.RequestCompletionHandler;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.errors.AuthenticationException;
@@ -159,7 +160,7 @@ public class ConsumerNetworkClient implements Closeable {
      * @return true if update succeeded, false otherwise.
      */
     public boolean awaitMetadataUpdate(Timer timer) {
-        int version = this.metadata.requestUpdate();
+        int version = this.metadata.requestUpdate(false);
         do {
             poll(timer);
         } while (this.metadata.updateVersion() == version && timer.notExpired());
@@ -211,8 +212,23 @@ public class ConsumerNetworkClient implements Closeable {
      * @throws InterruptException if the calling thread is interrupted
      */
     public boolean poll(RequestFuture<?> future, Timer timer) {
+        return poll(future, timer, false);
+    }
+
+    /**
+     * Block until the provided request future request has finished or the timeout has expired.
+     *
+     * @param future The request future to wait for
+     * @param timer Timer bounding how long this method can block
+     * @param disableWakeup true if we should not check for wakeups, false otherwise
+     *
+     * @return true if the future is done, false otherwise
+     * @throws WakeupException if {@link #wakeup()} is called from another thread and `disableWakeup` is false
+     * @throws InterruptException if the calling thread is interrupted
+     */
+    public boolean poll(RequestFuture<?> future, Timer timer, boolean disableWakeup) {
         do {
-            poll(timer, future);
+            poll(timer, future, disableWakeup);
         } while (!future.isDone() && timer.notExpired());
         return future.isDone();
     }
@@ -543,7 +559,7 @@ public class ConsumerNetworkClient implements Closeable {
     public boolean isUnavailable(Node node) {
         lock.lock();
         try {
-            return client.connectionFailed(node) && client.connectionDelay(node, time.milliseconds()) > 0;
+            return NetworkClientUtils.isUnavailable(client, node, time);
         } finally {
             lock.unlock();
         }
@@ -555,9 +571,7 @@ public class ConsumerNetworkClient implements Closeable {
     public void maybeThrowAuthFailure(Node node) {
         lock.lock();
         try {
-            AuthenticationException exception = client.authenticationException(node);
-            if (exception != null)
-                throw exception;
+            NetworkClientUtils.maybeThrowAuthFailure(client, node);
         } finally {
             lock.unlock();
         }
@@ -572,7 +586,7 @@ public class ConsumerNetworkClient implements Closeable {
     public void tryConnect(Node node) {
         lock.lock();
         try {
-            client.ready(node, time.milliseconds());
+            NetworkClientUtils.tryConnect(client, node, time);
         } finally {
             lock.unlock();
         }
@@ -694,12 +708,7 @@ public class ConsumerNetworkClient implements Closeable {
             // the lock protects removal from a concurrent put which could otherwise mutate the
             // queue after it has been removed from the map
             synchronized (unsent) {
-                Iterator<ConcurrentLinkedQueue<ClientRequest>> iterator = unsent.values().iterator();
-                while (iterator.hasNext()) {
-                    ConcurrentLinkedQueue<ClientRequest> requests = iterator.next();
-                    if (requests.isEmpty())
-                        iterator.remove();
-                }
+                unsent.values().removeIf(ConcurrentLinkedQueue::isEmpty);
             }
         }
 
@@ -708,13 +717,13 @@ public class ConsumerNetworkClient implements Closeable {
             // queue after it has been removed from the map
             synchronized (unsent) {
                 ConcurrentLinkedQueue<ClientRequest> requests = unsent.remove(node);
-                return requests == null ? Collections.<ClientRequest>emptyList() : requests;
+                return requests == null ? Collections.emptyList() : requests;
             }
         }
 
         public Iterator<ClientRequest> requestIterator(Node node) {
             ConcurrentLinkedQueue<ClientRequest> requests = unsent.get(node);
-            return requests == null ? Collections.<ClientRequest>emptyIterator() : requests.iterator();
+            return requests == null ? Collections.emptyIterator() : requests.iterator();
         }
 
         public Collection<Node> nodes() {

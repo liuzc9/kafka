@@ -19,11 +19,11 @@ package kafka.server
 
 import java.util
 import java.util.Properties
-import kafka.log.LogConfig
-import kafka.utils.TestInfoUtils
+import org.apache.kafka.common.config.TopicConfig
 import org.apache.kafka.common.errors.PolicyViolationException
 import org.apache.kafka.common.internals.Topic
 import org.apache.kafka.common.protocol.Errors
+import org.apache.kafka.server.config.ServerLogConfigs.CREATE_TOPIC_POLICY_CLASS_NAME_CONFIG
 import org.apache.kafka.server.policy.CreateTopicPolicy
 import org.apache.kafka.server.policy.CreateTopicPolicy.RequestMetadata
 import org.junit.jupiter.params.ParameterizedTest
@@ -36,16 +36,16 @@ class CreateTopicsRequestWithPolicyTest extends AbstractCreateTopicsRequestTest 
 
   override def brokerPropertyOverrides(properties: Properties): Unit = {
     super.brokerPropertyOverrides(properties)
-    properties.put(KafkaConfig.CreateTopicPolicyClassNameProp, classOf[Policy].getName)
+    properties.put(CREATE_TOPIC_POLICY_CLASS_NAME_CONFIG, classOf[Policy].getName)
   }
 
   override def kraftControllerConfigs(): Seq[Properties] = {
     val properties = new Properties()
-    properties.put(KafkaConfig.CreateTopicPolicyClassNameProp, classOf[Policy].getName)
+    properties.put(CREATE_TOPIC_POLICY_CLASS_NAME_CONFIG, classOf[Policy].getName)
     Seq(properties)
   }
 
-  @ParameterizedTest(name = TestInfoUtils.TestWithParameterizedQuorumName)
+  @ParameterizedTest
   @ValueSource(strings = Array("zk", "kraft"))
   def testValidCreateTopicsRequests(quorum: String): Unit = {
     validateValidCreateTopicsRequests(topicsReq(Seq(topicReq("topic1",
@@ -57,18 +57,18 @@ class CreateTopicsRequestWithPolicyTest extends AbstractCreateTopicsRequestTest 
 
     validateValidCreateTopicsRequests(topicsReq(Seq(topicReq("topic3",
       numPartitions = 11, replicationFactor = 2,
-      config = Map(LogConfig.RetentionMsProp -> 4999.toString))),
+      config = Map(TopicConfig.RETENTION_MS_CONFIG -> 4999.toString))),
       validateOnly = true))
 
     validateValidCreateTopicsRequests(topicsReq(Seq(topicReq("topic4",
       assignment = Map(0 -> List(1, 0), 1 -> List(0, 1))))))
   }
 
-  @ParameterizedTest(name = TestInfoUtils.TestWithParameterizedQuorumName)
+  @ParameterizedTest
   @ValueSource(strings = Array("zk", "kraft"))
   def testErrorCreateTopicsRequests(quorum: String): Unit = {
     val existingTopic = "existing-topic"
-    createTopic(existingTopic, 5, 1)
+    createTopic(existingTopic, 5)
 
     // Policy violations
     validateErrorCreateTopicsRequests(topicsReq(Seq(topicReq("policy-topic1",
@@ -81,19 +81,19 @@ class CreateTopicsRequestWithPolicyTest extends AbstractCreateTopicsRequestTest 
 
     validateErrorCreateTopicsRequests(topicsReq(Seq(topicReq("policy-topic3",
       numPartitions = 11, replicationFactor = 2,
-      config = Map(LogConfig.RetentionMsProp -> 5001.toString))), validateOnly = true),
+      config = Map(TopicConfig.RETENTION_MS_CONFIG -> 5001.toString))), validateOnly = true),
       Map("policy-topic3" -> error(Errors.POLICY_VIOLATION,
         Some("RetentionMs should be less than 5000ms if replicationFactor > 5"))))
 
     validateErrorCreateTopicsRequests(topicsReq(Seq(topicReq("policy-topic4",
       numPartitions = 11, replicationFactor = 3,
-      config = Map(LogConfig.RetentionMsProp -> 5001.toString))), validateOnly = true),
+      config = Map(TopicConfig.RETENTION_MS_CONFIG -> 5001.toString))), validateOnly = true),
       Map("policy-topic4" -> error(Errors.POLICY_VIOLATION,
         Some("RetentionMs should be less than 5000ms if replicationFactor > 5"))))
 
     validateErrorCreateTopicsRequests(topicsReq(Seq(topicReq("policy-topic5",
       assignment = Map(0 -> List(1), 1 -> List(0)),
-      config = Map(LogConfig.RetentionMsProp -> 5001.toString))), validateOnly = true),
+      config = Map(TopicConfig.RETENTION_MS_CONFIG -> 5001.toString))), validateOnly = true),
       Map("policy-topic5" -> error(Errors.POLICY_VIOLATION,
         Some("Topic partitions should have at least 2 partitions, received 1 for partition 0"))))
 
@@ -153,19 +153,19 @@ object CreateTopicsRequestWithPolicyTest {
         return
       }
       require(!closed, "Policy should not be closed")
-      require(!configs.isEmpty, "configure should have been called with non empty configs")
+      require(configs.nonEmpty, "configure should have been called with non empty configs")
 
       import requestMetadata._
       if (numPartitions != null || replicationFactor != null) {
         require(numPartitions != null, s"numPartitions should not be null, but it is $numPartitions")
         require(replicationFactor != null, s"replicationFactor should not be null, but it is $replicationFactor")
-        require(replicasAssignments == null, s"replicaAssigments should be null, but it is $replicasAssignments")
+        require(replicasAssignments == null, s"replicaAssignments should be null, but it is $replicasAssignments")
 
         if (numPartitions < 5)
           throw new PolicyViolationException(s"Topics should have at least 5 partitions, received $numPartitions")
 
         if (numPartitions > 10) {
-          if (requestMetadata.configs.asScala.get(LogConfig.RetentionMsProp).fold(true)(_.toInt > 5000))
+          if (requestMetadata.configs.asScala.get(TopicConfig.RETENTION_MS_CONFIG).fold(true)(_.toInt > 5000))
             throw new PolicyViolationException("RetentionMs should be less than 5000ms if replicationFactor > 5")
         } else
           require(requestMetadata.configs.isEmpty, s"Topic configs should be empty, but it is ${requestMetadata.configs}")
@@ -173,7 +173,7 @@ object CreateTopicsRequestWithPolicyTest {
       } else {
         require(numPartitions == null, s"numPartitions should be null, but it is $numPartitions")
         require(replicationFactor == null, s"replicationFactor should be null, but it is $replicationFactor")
-        require(replicasAssignments != null, s"replicaAssigments should not be null, but it is $replicasAssignments")
+        require(replicasAssignments != null, s"replicaAssignments should not be null, but it is $replicasAssignments")
 
         replicasAssignments.asScala.toSeq.sortBy { case (tp, _) => tp }.foreach { case (partitionId, assignment) =>
           if (assignment.size < 2)

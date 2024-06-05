@@ -37,13 +37,18 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.function.Supplier;
 
 import static org.apache.kafka.common.message.JoinGroupRequestData.JoinGroupRequestProtocolCollection;
 import static org.apache.kafka.common.message.JoinGroupResponseData.JoinGroupResponseMember;
+import static org.apache.kafka.common.utils.Utils.UncheckedCloseable;
 import static org.apache.kafka.connect.runtime.distributed.ConnectProtocolCompatibility.EAGER;
+
 
 /**
  * This class manages the coordination process with the Kafka group coordinator on the broker for managing assignments
@@ -118,7 +123,7 @@ public class WorkerCoordinator extends AbstractCoordinator implements Closeable 
         return super.ensureCoordinatorReady(timer);
     }
 
-    public void poll(long timeout) {
+    public void poll(long timeout, Supplier<UncheckedCloseable> onPoll) {
         // poll for io until the timeout expires
         final long start = time.milliseconds();
         long now = start;
@@ -128,7 +133,11 @@ public class WorkerCoordinator extends AbstractCoordinator implements Closeable 
             if (coordinatorUnknown()) {
                 log.debug("Broker coordinator is marked unknown. Attempting discovery with a timeout of {}ms",
                         coordinatorDiscoveryTimeoutMs);
-                if (ensureCoordinatorReady(time.timer(coordinatorDiscoveryTimeoutMs))) {
+                boolean coordinatorReady;
+                try (UncheckedCloseable polling = onPoll.get()) {
+                    coordinatorReady = ensureCoordinatorReady(time.timer(coordinatorDiscoveryTimeoutMs));
+                }
+                if (coordinatorReady) {
                     log.debug("Broker coordinator is ready");
                 } else {
                     log.debug("Can not connect to broker coordinator");
@@ -144,7 +153,9 @@ public class WorkerCoordinator extends AbstractCoordinator implements Closeable 
             }
 
             if (rejoinNeededOrPending()) {
-                ensureActiveGroup();
+                try (UncheckedCloseable polling = onPoll.get()) {
+                    ensureActiveGroup();
+                }
                 now = time.milliseconds();
             }
 
@@ -156,7 +167,9 @@ public class WorkerCoordinator extends AbstractCoordinator implements Closeable 
             // Note that because the network client is shared with the background heartbeat thread,
             // we do not want to block in poll longer than the time to the next heartbeat.
             long pollTimeout = Math.min(Math.max(0, remaining), timeToNextHeartbeat(now));
-            client.poll(time.timer(pollTimeout));
+            try (UncheckedCloseable polling = onPoll.get()) {
+                client.poll(time.timer(pollTimeout));
+            }
 
             now = time.milliseconds();
             elapsed = now - start;
@@ -254,9 +267,15 @@ public class WorkerCoordinator extends AbstractCoordinator implements Closeable 
         return JoinGroupRequest.UNKNOWN_MEMBER_ID;
     }
 
+    @Override
+    protected void handlePollTimeoutExpiry() {
+        listener.onPollTimeoutExpiry();
+        maybeLeaveGroup("worker poll timeout has expired.");
+    }
+
     /**
      * Return the current generation. The generation refers to this worker's knowledge with
-     * respect to which  generation is the latest one and, therefore, this information is local.
+     * respect to which generation is the latest one and, therefore, this information is local.
      *
      * @return the generation ID or -1 if no generation is defined
      */
@@ -455,30 +474,37 @@ public class WorkerCoordinator extends AbstractCoordinator implements Closeable 
         }
 
         public static class Builder {
-            private Collection<String> withConnectors;
-            private Collection<ConnectorTaskId> withTasks;
+            private Set<String> withConnectors = new LinkedHashSet<>();
+            private Set<ConnectorTaskId> withTasks = new LinkedHashSet<>();
 
             public Builder() {
             }
 
-            public ConnectorsAndTasks.Builder withCopies(Collection<String> connectors,
-                                                         Collection<ConnectorTaskId> tasks) {
-                withConnectors = new ArrayList<>(connectors);
-                withTasks = new ArrayList<>(tasks);
+            public ConnectorsAndTasks.Builder with(Collection<String> connectors,
+                                                   Collection<ConnectorTaskId> tasks) {
+                withConnectors = new LinkedHashSet<>(connectors);
+                withTasks = new LinkedHashSet<>(tasks);
                 return this;
             }
 
-            public ConnectorsAndTasks.Builder with(Collection<String> connectors,
-                                                   Collection<ConnectorTaskId> tasks) {
-                withConnectors = new ArrayList<>(connectors);
-                withTasks = new ArrayList<>(tasks);
+            public ConnectorsAndTasks.Builder addConnectors(Collection<String> connectors) {
+                this.withConnectors.addAll(connectors);
                 return this;
+            }
+
+            public ConnectorsAndTasks.Builder addTasks(Collection<ConnectorTaskId> tasks) {
+                this.withTasks.addAll(tasks);
+                return this;
+            }
+
+            public ConnectorsAndTasks.Builder addAll(ConnectorsAndTasks connectorsAndTasks) {
+                return this
+                        .addConnectors(connectorsAndTasks.connectors())
+                        .addTasks(connectorsAndTasks.tasks());
             }
 
             public ConnectorsAndTasks build() {
-                return new ConnectorsAndTasks(
-                        withConnectors != null ? withConnectors : new ArrayList<>(),
-                        withTasks != null ? withTasks : new ArrayList<>());
+                return new ConnectorsAndTasks(withConnectors, withTasks);
             }
         }
 

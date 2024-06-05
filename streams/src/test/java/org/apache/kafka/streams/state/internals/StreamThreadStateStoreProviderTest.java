@@ -57,20 +57,23 @@ import org.apache.kafka.streams.state.TimestampedWindowStore;
 import org.apache.kafka.streams.state.ValueAndTimestamp;
 import org.apache.kafka.test.MockApiProcessorSupplier;
 import org.apache.kafka.test.MockClientSupplier;
+import org.apache.kafka.test.MockStandbyUpdateListener;
 import org.apache.kafka.test.MockStateRestoreListener;
 import org.apache.kafka.test.TestUtils;
-import org.easymock.EasyMock;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.mockito.Mock;
+import org.mockito.junit.MockitoJUnitRunner;
 
 import java.io.File;
 import java.io.IOException;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -83,7 +86,10 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+@RunWith(MockitoJUnitRunner.StrictStubs.class)
 public class StreamThreadStateStoreProviderTest {
 
     private StreamTask taskOne;
@@ -91,6 +97,7 @@ public class StreamThreadStateStoreProviderTest {
     private StateDirectory stateDirectory;
     private File stateDir;
     private final String topicName = "topic";
+    @Mock
     private StreamThread threadMock;
     private Map<TaskId, Task> tasks;
 
@@ -174,7 +181,6 @@ public class StreamThreadStateStoreProviderTest {
         taskTwo.initializeIfNeeded();
         tasks.put(new TaskId(0, 1), taskTwo);
 
-        threadMock = EasyMock.createNiceMock(StreamThread.class);
         provider = new StreamThreadStateStoreProvider(threadMock);
 
     }
@@ -415,8 +421,11 @@ public class StreamThreadStateStoreProviderTest {
                 logContext,
                 clientSupplier.adminClient,
                 clientSupplier.restoreConsumer,
-                new MockStateRestoreListener()),
-            topology.storeToChangelogTopic(), partitions);
+                new MockStateRestoreListener(),
+                new MockStandbyUpdateListener()),
+            topology.storeToChangelogTopic(),
+            partitions,
+            false);
         final RecordCollector recordCollector = new RecordCollectorImpl(
             logContext,
             taskId,
@@ -449,22 +458,21 @@ public class StreamThreadStateStoreProviderTest {
             new TopologyConfig(null, streamsConfig, new Properties()).getTaskConfig(),
             streamsMetrics,
             stateDirectory,
-            EasyMock.createNiceMock(ThreadCache.class),
+            mock(ThreadCache.class),
             new MockTime(),
             stateManager,
             recordCollector,
-            context, logContext);
+            context,
+            logContext,
+            false
+        );
     }
 
     private void mockThread(final boolean initialized) {
-        EasyMock.expect(threadMock.isRunning()).andReturn(initialized);
-        EasyMock.expect(threadMock.allTasks()).andStubReturn(tasks);
-        EasyMock.expect(threadMock.activeTaskMap()).andStubReturn(tasks);
-        EasyMock.expect(threadMock.activeTasks()).andStubReturn(new ArrayList<>(tasks.values()));
-        EasyMock.expect(threadMock.state()).andReturn(
+        when(threadMock.readOnlyActiveTasks()).thenReturn(new HashSet<>(tasks.values()));
+        when(threadMock.state()).thenReturn(
             initialized ? StreamThread.State.RUNNING : StreamThread.State.PARTITIONS_ASSIGNED
-        ).anyTimes();
-        EasyMock.replay(threadMock);
+        );
     }
 
     private void configureClients(final MockClientSupplier clientSupplier, final String topic) {

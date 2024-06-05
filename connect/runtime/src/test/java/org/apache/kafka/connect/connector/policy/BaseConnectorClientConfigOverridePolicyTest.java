@@ -27,7 +27,7 @@ import java.util.Map;
 
 public abstract class BaseConnectorClientConfigOverridePolicyTest {
 
-    protected abstract ConnectorClientConfigOverridePolicy  policyToTest();
+    protected abstract ConnectorClientConfigOverridePolicy policyToTest();
 
     protected void testValidOverride(Map<String, Object> clientConfig) {
         List<ConfigValue> configValues = configValues(clientConfig);
@@ -50,10 +50,10 @@ public abstract class BaseConnectorClientConfigOverridePolicyTest {
     }
 
     protected void assertNoError(List<ConfigValue> configValues) {
-        Assert.assertTrue(configValues.stream().allMatch(configValue -> configValue.errorMessages().size() == 0));
+        Assert.assertTrue(configValues.stream().allMatch(configValue -> configValue.errorMessages().isEmpty()));
     }
 
     protected void assertError(List<ConfigValue> configValues) {
-        Assert.assertTrue(configValues.stream().anyMatch(configValue -> configValue.errorMessages().size() > 0));
+        Assert.assertTrue(configValues.stream().anyMatch(configValue -> !configValue.errorMessages().isEmpty()));
     }
 }

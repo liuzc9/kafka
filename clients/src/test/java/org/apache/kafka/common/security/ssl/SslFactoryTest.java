@@ -20,7 +20,9 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.security.GeneralSecurityException;
+import java.security.KeyPair;
 import java.security.KeyStore;
+import java.security.cert.X509Certificate;
 import java.util.Arrays;
 import java.util.Map;
 
@@ -46,8 +48,10 @@ import org.apache.kafka.common.network.Mode;
 import org.apache.kafka.test.TestUtils;
 import org.junit.jupiter.api.Test;
 
+import static org.apache.kafka.common.security.ssl.SslFactory.CertificateEntries.ensureCompatible;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
@@ -71,13 +75,28 @@ public abstract class SslFactoryTest {
         Map<String, Object> serverSslConfig = sslConfigsBuilder(Mode.SERVER)
                 .createNewTrustStore(trustStoreFile)
                 .build();
-        SslFactory sslFactory = new SslFactory(Mode.SERVER);
-        sslFactory.configure(serverSslConfig);
-        //host and port are hints
-        SSLEngine engine = sslFactory.createSslEngine("localhost", 0);
-        assertNotNull(engine);
-        assertEquals(Utils.mkSet(tlsProtocol), Utils.mkSet(engine.getEnabledProtocols()));
-        assertEquals(false, engine.getUseClientMode());
+        try (SslFactory sslFactory = new SslFactory(Mode.SERVER, null, true)) {
+            sslFactory.configure(serverSslConfig);
+            //host and port are hints
+            SSLEngine engine = sslFactory.createSslEngine("localhost", 0);
+            assertNotNull(engine);
+            assertEquals(Utils.mkSet(tlsProtocol), Utils.mkSet(engine.getEnabledProtocols()));
+            assertFalse(engine.getUseClientMode());
+        }
+    }
+
+    @Test
+    public void testSslFactoryConfigWithManyKeyStoreEntries() throws Exception {
+        //generate server configs for keystore with multiple certificate chain
+        Map<String, Object> serverSslConfig = TestSslUtils.generateConfigsWithCertificateChains(tlsProtocol);
+
+        try (SslFactory sslFactory = new SslFactory(Mode.SERVER, null, true)) {
+            sslFactory.configure(serverSslConfig);
+            SSLEngine engine = sslFactory.createSslEngine("localhost", 0);
+            assertNotNull(engine);
+            assertEquals(Utils.mkSet(tlsProtocol), Utils.mkSet(engine.getEnabledProtocols()));
+            assertFalse(engine.getUseClientMode());
+        }
     }
 
     @Test
@@ -384,7 +403,7 @@ public abstract class SslFactoryTest {
     }
 
     private void verifyKeystoreVerifiableUsingTruststore(boolean usePem, String tlsProtocol) throws Exception {
-        File trustStoreFile1 = usePem ? null : File.createTempFile("truststore1", ".jks");
+        File trustStoreFile1 = usePem ? null : TestUtils.tempFile("truststore1", ".jks");
         Map<String, Object> sslConfig1 = sslConfigsBuilder(Mode.SERVER)
                 .createNewTrustStore(trustStoreFile1)
                 .usePem(usePem)
@@ -392,7 +411,7 @@ public abstract class SslFactoryTest {
         SslFactory sslFactory = new SslFactory(Mode.SERVER, null, true);
         sslFactory.configure(sslConfig1);
 
-        File trustStoreFile2 = usePem ? null : File.createTempFile("truststore2", ".jks");
+        File trustStoreFile2 = usePem ? null : TestUtils.tempFile("truststore2", ".jks");
         Map<String, Object> sslConfig2 = sslConfigsBuilder(Mode.SERVER)
                 .createNewTrustStore(trustStoreFile2)
                 .usePem(usePem)
@@ -456,7 +475,7 @@ public abstract class SslFactoryTest {
         clientSslConfig.put(SslConfigs.SSL_ENGINE_FACTORY_CLASS_CONFIG, TestSslUtils.TestSslEngineFactory.class);
         SslFactory sslFactory = new SslFactory(Mode.CLIENT);
         sslFactory.configure(clientSslConfig);
-        assertTrue(sslFactory.sslEngineFactory() instanceof TestSslUtils.TestSslEngineFactory,
+        assertInstanceOf(TestSslUtils.TestSslEngineFactory.class, sslFactory.sslEngineFactory(),
             "SslEngineFactory must be of expected type");
     }
 
@@ -489,7 +508,7 @@ public abstract class SslFactoryTest {
         serverSslConfig.put(SslConfigs.SSL_ENGINE_FACTORY_CLASS_CONFIG, TestSslUtils.TestSslEngineFactory.class);
         SslFactory sslFactory = new SslFactory(Mode.SERVER);
         sslFactory.configure(serverSslConfig);
-        assertTrue(sslFactory.sslEngineFactory() instanceof TestSslUtils.TestSslEngineFactory,
+        assertInstanceOf(TestSslUtils.TestSslEngineFactory.class, sslFactory.sslEngineFactory(),
             "SslEngineFactory must be of expected type");
     }
 
@@ -519,6 +538,48 @@ public abstract class SslFactoryTest {
         SslFactory sslFactory = new SslFactory(Mode.SERVER);
         sslFactory.configure(securityConfig.values());
         assertFalse(securityConfig.unused().contains(SslConfigs.SSL_ENGINE_FACTORY_CLASS_CONFIG));
+    }
+
+    @Test
+    public void testDynamicUpdateCompatibility() throws Exception {
+        KeyPair keyPair = TestSslUtils.generateKeyPair("RSA");
+        KeyStore ks = createKeyStore(keyPair, "*.example.com", "Kafka", true, "localhost", "*.example.com");
+        ensureCompatible(ks, ks, false, false);
+        ensureCompatible(ks, createKeyStore(keyPair, "*.example.com", "Kafka", true, "localhost", "*.example.com"), false, false);
+        ensureCompatible(ks, createKeyStore(keyPair, " *.example.com", " Kafka ", true, "localhost", "*.example.com"), false, false);
+        ensureCompatible(ks, createKeyStore(keyPair, "*.example.COM", "Kafka", true, "localhost", "*.example.com"), false, false);
+        ensureCompatible(ks, createKeyStore(keyPair, "*.EXAMPLE.COM", "KAFKA", true, "localhost", "*.example.com"), false, false);
+        ensureCompatible(ks, createKeyStore(keyPair, "*.EXAMPLE.COM", "Kafka", true, "*.example.com"), false, false);
+        ensureCompatible(ks, createKeyStore(keyPair, "*.EXAMPLE.COM", "Kafka", true, "localhost"), false, false);
+
+        ensureCompatible(ks, createKeyStore(keyPair, "*.example.com", "Kafka", false, "localhost", "*.example.com"), false, false);
+        ensureCompatible(ks, createKeyStore(keyPair, "*.example.COM", "Kafka", false, "localhost", "*.example.com"), false, false);
+        ensureCompatible(ks, createKeyStore(keyPair, "*.EXAMPLE.COM", "KAFKA", false, "localhost", "*.example.com"), false, false);
+        ensureCompatible(ks, createKeyStore(keyPair, "*.EXAMPLE.COM", "Kafka", false, "*.example.com"), false, false);
+        ensureCompatible(ks, createKeyStore(keyPair, "*.EXAMPLE.COM", "Kafka", false, "localhost"), false, false);
+
+        assertThrows(ConfigException.class, () ->
+                ensureCompatible(ks, createKeyStore(keyPair, " *.example.com", " Kafka ", false, "localhost", "*.example.com"), false, false));
+        assertThrows(ConfigException.class, () ->
+                ensureCompatible(ks, createKeyStore(keyPair, "*.another.example.com", "Kafka", true, "*.example.com"), false, false));
+        assertThrows(ConfigException.class, () ->
+                ensureCompatible(ks, createKeyStore(keyPair, "*.EXAMPLE.COM", "Kafka", true, "*.another.example.com"), false, false));
+
+        // Test disabling of validation
+        ensureCompatible(ks, createKeyStore(keyPair, " *.another.example.com", "Kafka ", true, "localhost", "*.another.example.com"), true, true);
+        ensureCompatible(ks, createKeyStore(keyPair, "*.example.com", "Kafka", true, "localhost", "*.another.example.com"), false, true);
+        assertThrows(ConfigException.class, () -> ensureCompatible(ks, createKeyStore(keyPair, "*.example.com", "Kafka", true, "localhost", "*.another.example.com"), true, false));
+        ensureCompatible(ks, createKeyStore(keyPair, "*.another.example.com", "Kafka", true, "localhost", "*.example.com"), true, false);
+        assertThrows(ConfigException.class, () -> ensureCompatible(ks, createKeyStore(keyPair, "*.another.example.com", "Kafka", true, "localhost", "*.example.com"), false, true));
+    }
+
+    private KeyStore createKeyStore(KeyPair keyPair, String commonName, String org, boolean utf8, String... dnsNames) throws Exception {
+        X509Certificate cert = new TestSslUtils.CertificateBuilder().sanDnsNames(dnsNames)
+                .generate(commonName, org, utf8, keyPair);
+        KeyStore ks = KeyStore.getInstance("PKCS12");
+        ks.load(null, null);
+        ks.setKeyEntry("kafka", keyPair.getPrivate(), null, new X509Certificate[] {cert});
+        return ks;
     }
 
     private KeyStore sslKeyStore(Map<String, Object> sslConfig) {

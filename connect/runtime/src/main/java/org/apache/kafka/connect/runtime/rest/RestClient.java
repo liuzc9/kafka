@@ -19,7 +19,8 @@ package org.apache.kafka.connect.runtime.rest;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.kafka.connect.runtime.WorkerConfig;
+import org.apache.kafka.connect.runtime.distributed.Crypto;
+import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.connect.runtime.rest.entities.ErrorMessage;
 import org.apache.kafka.connect.runtime.rest.errors.ConnectRestException;
 import org.apache.kafka.connect.runtime.rest.util.SSLUtils;
@@ -30,6 +31,7 @@ import org.eclipse.jetty.client.util.StringContentProvider;
 import org.eclipse.jetty.http.HttpField;
 import org.eclipse.jetty.http.HttpFields;
 import org.eclipse.jetty.http.HttpStatus;
+import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -40,55 +42,88 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 
+/**
+ * Client for outbound REST requests to other members of a Connect cluster
+ * This class is thread-safe.
+ */
 public class RestClient {
     private static final Logger log = LoggerFactory.getLogger(RestClient.class);
     private static final ObjectMapper JSON_SERDE = new ObjectMapper();
 
-    /**
-     * Sends HTTP request to remote REST server
-     *
-     * @param url             HTTP connection will be established with this url.
-     * @param method          HTTP method ("GET", "POST", "PUT", etc.)
-     * @param headers         HTTP headers from REST endpoint
-     * @param requestBodyData Object to serialize as JSON and send in the request body.
-     * @param responseFormat  Expected format of the response to the HTTP request.
-     * @param <T>             The type of the deserialized response to the HTTP request.
-     * @return The deserialized response to the HTTP request, or null if no data is expected.
-     */
-    public static <T> HttpResponse<T> httpRequest(String url, String method, HttpHeaders headers, Object requestBodyData,
-                                                  TypeReference<T> responseFormat, WorkerConfig config) {
-        return httpRequest(url, method, headers, requestBodyData, responseFormat, config, null, null);
+    private final AbstractConfig config;
+
+    public RestClient(AbstractConfig config) {
+        this.config = config;
+    }
+
+    // VisibleForTesting
+    HttpClient httpClient(SslContextFactory.Client sslContextFactory) {
+        return sslContextFactory != null ? new HttpClient(sslContextFactory) : new HttpClient();
     }
 
     /**
      * Sends HTTP request to remote REST server
      *
-     * @param url                       HTTP connection will be established with this url.
-     * @param method                    HTTP method ("GET", "POST", "PUT", etc.)
+     * @param url             HTTP connection will be established with this url, non-null.
+     * @param method          HTTP method ("GET", "POST", "PUT", etc.), non-null
+     * @param headers         HTTP headers from REST endpoint
+     * @param requestBodyData Object to serialize as JSON and send in the request body.
+     * @param responseFormat  Expected format of the response to the HTTP request, non-null.
+     * @param <T>             The type of the deserialized response to the HTTP request.
+     * @return The deserialized response to the HTTP request, containing null if no data is expected or returned.
+     */
+    public <T> HttpResponse<T> httpRequest(String url, String method, HttpHeaders headers, Object requestBodyData,
+                                                  TypeReference<T> responseFormat) {
+        return httpRequest(url, method, headers, requestBodyData, responseFormat, null, null);
+    }
+
+    /**
+     * Sends HTTP request to remote REST server
+     *
+     * @param url                       HTTP connection will be established with this url, non-null.
+     * @param method                    HTTP method ("GET", "POST", "PUT", etc.), non-null
      * @param headers                   HTTP headers from REST endpoint
      * @param requestBodyData           Object to serialize as JSON and send in the request body.
-     * @param responseFormat            Expected format of the response to the HTTP request.
+     * @param sessionKey                The key to sign the request with (intended for internal requests only);
+     *                                  may be null if the request doesn't need to be signed
+     * @param requestSignatureAlgorithm The algorithm to sign the request with (intended for internal requests only);
+     *                                  may be null if the request doesn't need to be signed
+     */
+    public void httpRequest(String url, String method, HttpHeaders headers, Object requestBodyData,
+                                           SecretKey sessionKey, String requestSignatureAlgorithm) {
+        httpRequest(url, method, headers, requestBodyData, new TypeReference<Void>() { }, sessionKey, requestSignatureAlgorithm);
+    }
+
+    /**
+     * Sends HTTP request to remote REST server
+     *
+     * @param url                       HTTP connection will be established with this url, non-null.
+     * @param method                    HTTP method ("GET", "POST", "PUT", etc.), non-null
+     * @param headers                   HTTP headers from REST endpoint
+     * @param requestBodyData           Object to serialize as JSON and send in the request body.
+     * @param responseFormat            Expected format of the response to the HTTP request, non-null.
      * @param <T>                       The type of the deserialized response to the HTTP request.
      * @param sessionKey                The key to sign the request with (intended for internal requests only);
      *                                  may be null if the request doesn't need to be signed
      * @param requestSignatureAlgorithm The algorithm to sign the request with (intended for internal requests only);
      *                                  may be null if the request doesn't need to be signed
-     * @return The deserialized response to the HTTP request, or null if no data is expected.
+     * @return The deserialized response to the HTTP request, containing null if no data is expected or returned.
      */
-    public static <T> HttpResponse<T> httpRequest(String url, String method, HttpHeaders headers, Object requestBodyData,
-                                                  TypeReference<T> responseFormat, WorkerConfig config,
+    public <T> HttpResponse<T> httpRequest(String url, String method, HttpHeaders headers, Object requestBodyData,
+                                                  TypeReference<T> responseFormat,
                                                   SecretKey sessionKey, String requestSignatureAlgorithm) {
-        HttpClient client;
-
-        if (url.startsWith("https://")) {
-            client = new HttpClient(SSLUtils.createClientSideSslContextFactory(config));
-        } else {
-            client = new HttpClient();
-        }
-
+        Objects.requireNonNull(url, "url must be non-null");
+        Objects.requireNonNull(method, "method must be non-null");
+        Objects.requireNonNull(responseFormat, "response format must be non-null");
+        // Only try to load SSL configs if we have to (see KAFKA-14816)
+        SslContextFactory.Client sslContextFactory = url.startsWith("https://")
+                ? SSLUtils.createClientSideSslContextFactory(config)
+                : null;
+        HttpClient client = httpClient(sslContextFactory);
         client.setFollowRedirects(false);
 
         try {
@@ -109,7 +144,7 @@ public class RestClient {
         }
     }
 
-    static <T> HttpResponse<T> httpRequest(HttpClient client, String url, String method,
+    private <T> HttpResponse<T> httpRequest(HttpClient client, String url, String method,
                                            HttpHeaders headers, Object requestBodyData,
                                            TypeReference<T> responseFormat, SecretKey sessionKey,
                                            String requestSignatureAlgorithm) {
@@ -129,6 +164,7 @@ public class RestClient {
 
             if (sessionKey != null && requestSignatureAlgorithm != null) {
                 InternalRequestSignature.addToRequest(
+                    Crypto.SYSTEM,
                     sessionKey,
                     serializedBody != null ? serializedBody.getBytes(StandardCharsets.UTF_8) : null,
                     requestSignatureAlgorithm,
@@ -154,15 +190,15 @@ public class RestClient {
                         "Unexpected status code when handling forwarded request: " + responseCode);
             }
         } catch (IOException | InterruptedException | TimeoutException | ExecutionException e) {
-            log.error("IO error forwarding REST request: ", e);
+            log.error("IO error forwarding REST request to {} :", url, e);
             throw new ConnectRestException(Response.Status.INTERNAL_SERVER_ERROR, "IO Error trying to forward REST request: " + e.getMessage(), e);
         } catch (ConnectRestException e) {
             // catching any explicitly thrown ConnectRestException-s to preserve its status code
             // and to avoid getting it overridden by the more generic catch (Throwable) clause down below
-            log.error("Error forwarding REST request", e);
+            log.error("Error forwarding REST request to {} :", url, e);
             throw e;
         } catch (Throwable t) {
-            log.error("Error forwarding REST request", t);
+            log.error("Error forwarding REST request to {} :", url, t);
             throw new ConnectRestException(Response.Status.INTERNAL_SERVER_ERROR, "Error trying to forward REST request: " + t.getMessage(), t);
         }
     }
@@ -183,9 +219,9 @@ public class RestClient {
     }
 
     /**
-     * Convert response parameters from Jetty format (HttpFields)
-     * @param httpFields
-     * @return
+     * Convert response headers from Jetty format ({@link HttpFields}) to a simple {@link Map}
+     * @param httpFields the response headers
+     * @return a {@link Map} containing the response headers
      */
     private static Map<String, String> convertHttpFieldsToMap(HttpFields httpFields) {
         Map<String, String> headers = new HashMap<>();

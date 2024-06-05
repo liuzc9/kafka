@@ -26,6 +26,7 @@ import org.apache.kafka.common.message.CreateTopicsRequestData
 import org.apache.kafka.common.message.CreateTopicsRequestData._
 import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.requests._
+import org.apache.kafka.server.config.ServerLogConfigs
 import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertNotEquals, assertNotNull, assertTrue}
 
 import scala.jdk.CollectionConverters._
@@ -33,7 +34,7 @@ import scala.jdk.CollectionConverters._
 abstract class AbstractCreateTopicsRequestTest extends BaseRequestTest {
 
   override def brokerPropertyOverrides(properties: Properties): Unit =
-    properties.put(KafkaConfig.AutoCreateTopicsEnableProp, false.toString)
+    properties.put(ServerLogConfigs.AUTO_CREATE_TOPICS_ENABLE_CONFIG, false.toString)
 
   def topicsReq(topics: Seq[CreatableTopic],
                 timeout: Integer = 10000,
@@ -98,7 +99,7 @@ abstract class AbstractCreateTopicsRequestTest extends BaseRequestTest {
       s"There should be no errors, found ${response.errorCounts().keySet().asScala.mkString(", ")},")
 
     request.data.topics.forEach { topic =>
-      def verifyMetadata(socketServer: SocketServer) = {
+      def verifyMetadata(socketServer: SocketServer): Unit = {
         val metadata = sendMetadataRequest(
           new MetadataRequest.Builder(List(topic.name()).asJava, false).build(), socketServer).topicMetadata.asScala
         val metadataForTopic = metadata.filter(_.topic == topic.name()).head
@@ -163,9 +164,9 @@ abstract class AbstractCreateTopicsRequestTest extends BaseRequestTest {
       if (actual == null) {
         throw new RuntimeException(s"No response data found for topic $topicName")
       }
-      assertEquals(expected.error.code(), actual.errorCode(), "The response error should match")
+      assertEquals(expected.error.code(), actual.errorCode(), "The response error code should match")
       if (checkErrorMessage) {
-        assertEquals(expected.message, actual.errorMessage())
+        assertEquals(expected.message, actual.errorMessage(), "The response error message should match")
       }
       // If no error validate topic exists
       if (expectedError.isSuccess && !request.data.validateOnly) {

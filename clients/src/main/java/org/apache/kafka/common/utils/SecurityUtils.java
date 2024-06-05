@@ -19,8 +19,6 @@ package org.apache.kafka.common.utils;
 import org.apache.kafka.common.acl.AclOperation;
 import org.apache.kafka.common.acl.AclPermissionType;
 import org.apache.kafka.common.config.SecurityConfig;
-import org.apache.kafka.common.resource.PatternType;
-import org.apache.kafka.common.resource.ResourcePattern;
 import org.apache.kafka.common.resource.ResourceType;
 import org.apache.kafka.common.security.auth.SecurityProviderCreator;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
@@ -78,7 +76,7 @@ public class SecurityUtils {
 
     public static void addConfiguredSecurityProviders(Map<String, ?> configs) {
         String securityProviderClassesStr = (String) configs.get(SecurityConfig.SECURITY_PROVIDERS_CONFIG);
-        if (securityProviderClassesStr == null || securityProviderClassesStr.equals("")) {
+        if (securityProviderClassesStr == null || securityProviderClassesStr.isEmpty()) {
             return;
         }
         try {
@@ -170,10 +168,5 @@ public class SecurityUtils {
             throw new IllegalArgumentException(
                 "Unknown operation type");
         }
-    }
-
-    public static boolean denyAll(ResourcePattern pattern) {
-        return pattern.patternType() == PatternType.LITERAL
-            && pattern.name().equals(ResourcePattern.WILDCARD_RESOURCE);
     }
 }

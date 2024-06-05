@@ -28,10 +28,9 @@ import java.time.ZoneOffset;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-@Timeout(value = 120000, unit = MILLISECONDS)
+@Timeout(value = 120)
 public class CoordinatorClientTest {
 
     @Test
@@ -75,4 +74,4 @@ public class CoordinatorClientTest {
                     true,
                     JsonNodeFactory.instance.objectNode()), ZoneOffset.UTC));
     }
-};
+}

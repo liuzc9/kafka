@@ -18,7 +18,6 @@
 package kafka.server
 
 import java.util.Properties
-
 import kafka.server.metadata.ZkConfigRepository
 import kafka.utils.TestUtils
 import kafka.zk.{AdminZkClient, KafkaZkClient}
@@ -27,11 +26,9 @@ import org.apache.kafka.common.config.ConfigResource
 import org.apache.kafka.common.message.DescribeConfigsRequestData
 import org.apache.kafka.common.message.DescribeConfigsResponseData
 import org.apache.kafka.common.protocol.Errors
+import org.apache.kafka.server.config.ConfigType
 import org.junit.jupiter.api.{AfterEach, Test}
-import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertFalse
-import org.junit.jupiter.api.Assertions.assertNotNull
-import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertNotEquals, assertNotNull, assertThrows}
 import org.mockito.Mockito.{mock, when}
 
 import scala.jdk.CollectionConverters._
@@ -55,8 +52,30 @@ class ZkAdminManagerTest {
   }
 
   @Test
+  def testClientQuotasToProps(): Unit = {
+    val emptyProps = ZkAdminManager.clientQuotaPropsToDoubleMap(Map.empty)
+    assertEquals(0, emptyProps.size)
+
+    val oneProp = ZkAdminManager.clientQuotaPropsToDoubleMap(Map("foo" -> "1234"))
+    assertEquals(1, oneProp.size)
+    assertEquals(1234.0, oneProp("foo"))
+
+    // This is probably not desired, but kept for compatibility with existing usages
+    val emptyKey = ZkAdminManager.clientQuotaPropsToDoubleMap(Map("" -> "-42.1"))
+    assertEquals(1, emptyKey.size)
+    assertEquals(-42.1, emptyKey(""))
+
+    val manyProps = ZkAdminManager.clientQuotaPropsToDoubleMap(Map("foo" -> "1234", "bar" -> "0", "spam" -> "-1234.56"))
+    assertEquals(3, manyProps.size)
+
+    assertThrows(classOf[NullPointerException], () => ZkAdminManager.clientQuotaPropsToDoubleMap(Map("foo" -> null)))
+    assertThrows(classOf[IllegalStateException], () => ZkAdminManager.clientQuotaPropsToDoubleMap(Map("foo" -> "bar")))
+    assertThrows(classOf[IllegalStateException], () => ZkAdminManager.clientQuotaPropsToDoubleMap(Map("foo" -> "")))
+  }
+
+  @Test
   def testDescribeConfigsWithNullConfigurationKeys(): Unit = {
-    when(zkClient.getEntityConfigs(ConfigType.Topic, topic)).thenReturn(TestUtils.createBrokerConfig(brokerId, "zk"))
+    when(zkClient.getEntityConfigs(ConfigType.TOPIC, topic)).thenReturn(TestUtils.createBrokerConfig(brokerId, "zk"))
     when(metadataCache.contains(topic)).thenReturn(true)
 
     val resources = List(new DescribeConfigsRequestData.DescribeConfigsResource()
@@ -64,28 +83,28 @@ class ZkAdminManagerTest {
       .setResourceType(ConfigResource.Type.TOPIC.id)
       .setConfigurationKeys(null))
     val configHelper = createConfigHelper(metadataCache, zkClient)
-    val results: List[DescribeConfigsResponseData.DescribeConfigsResult] = configHelper.describeConfigs(resources, true, true)
+    val results: List[DescribeConfigsResponseData.DescribeConfigsResult] = configHelper.describeConfigs(resources, includeSynonyms = true, includeDocumentation = true)
     assertEquals(Errors.NONE.code, results.head.errorCode())
     assertFalse(results.head.configs().isEmpty, "Should return configs")
   }
 
   @Test
   def testDescribeConfigsWithEmptyConfigurationKeys(): Unit = {
-    when(zkClient.getEntityConfigs(ConfigType.Topic, topic)).thenReturn(TestUtils.createBrokerConfig(brokerId, "zk"))
+    when(zkClient.getEntityConfigs(ConfigType.TOPIC, topic)).thenReturn(TestUtils.createBrokerConfig(brokerId, "zk"))
     when(metadataCache.contains(topic)).thenReturn(true)
 
     val resources = List(new DescribeConfigsRequestData.DescribeConfigsResource()
       .setResourceName(topic)
       .setResourceType(ConfigResource.Type.TOPIC.id))
     val configHelper = createConfigHelper(metadataCache, zkClient)
-    val results: List[DescribeConfigsResponseData.DescribeConfigsResult] = configHelper.describeConfigs(resources, true, true)
+    val results: List[DescribeConfigsResponseData.DescribeConfigsResult] = configHelper.describeConfigs(resources, includeSynonyms = true, includeDocumentation = true)
     assertEquals(Errors.NONE.code, results.head.errorCode())
     assertFalse(results.head.configs().isEmpty, "Should return configs")
   }
 
   @Test
   def testDescribeConfigsWithConfigurationKeys(): Unit = {
-    when(zkClient.getEntityConfigs(ConfigType.Topic, topic)).thenReturn(TestUtils.createBrokerConfig(brokerId, "zk"))
+    when(zkClient.getEntityConfigs(ConfigType.TOPIC, topic)).thenReturn(TestUtils.createBrokerConfig(brokerId, "zk"))
     when(metadataCache.contains(topic)).thenReturn(true)
 
     val resources = List(new DescribeConfigsRequestData.DescribeConfigsResource()
@@ -94,7 +113,7 @@ class ZkAdminManagerTest {
       .setConfigurationKeys(List("retention.ms", "retention.bytes", "segment.bytes").asJava)
     )
     val configHelper = createConfigHelper(metadataCache, zkClient)
-    val results: List[DescribeConfigsResponseData.DescribeConfigsResult] = configHelper.describeConfigs(resources, true, true)
+    val results: List[DescribeConfigsResponseData.DescribeConfigsResult] = configHelper.describeConfigs(resources, includeSynonyms = true, includeDocumentation = true)
     assertEquals(Errors.NONE.code, results.head.errorCode())
     val resultConfigKeys = results.head.configs().asScala.map(r => r.name()).toSet
     assertEquals(Set("retention.ms", "retention.bytes", "segment.bytes"), resultConfigKeys)
@@ -102,8 +121,8 @@ class ZkAdminManagerTest {
 
   @Test
   def testDescribeConfigsWithDocumentation(): Unit = {
-    when(zkClient.getEntityConfigs(ConfigType.Topic, topic)).thenReturn(new Properties)
-    when(zkClient.getEntityConfigs(ConfigType.Broker, brokerId.toString)).thenReturn(new Properties)
+    when(zkClient.getEntityConfigs(ConfigType.TOPIC, topic)).thenReturn(new Properties)
+    when(zkClient.getEntityConfigs(ConfigType.BROKER, brokerId.toString)).thenReturn(new Properties)
     when(metadataCache.contains(topic)).thenReturn(true)
 
     val configHelper = createConfigHelper(metadataCache, zkClient)
@@ -116,7 +135,7 @@ class ZkAdminManagerTest {
         .setResourceName(brokerId.toString)
         .setResourceType(ConfigResource.Type.BROKER.id))
 
-    val results: List[DescribeConfigsResponseData.DescribeConfigsResult] = configHelper.describeConfigs(resources, true, true)
+    val results: List[DescribeConfigsResponseData.DescribeConfigsResult] = configHelper.describeConfigs(resources, includeSynonyms = true, includeDocumentation = true)
     assertEquals(2, results.size)
     results.foreach(r => {
       assertEquals(Errors.NONE.code, r.errorCode)

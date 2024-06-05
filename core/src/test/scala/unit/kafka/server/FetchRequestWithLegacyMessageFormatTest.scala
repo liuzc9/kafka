@@ -16,14 +16,15 @@
  */
 package kafka.server
 
-import kafka.log.LogConfig
 import org.apache.kafka.clients.producer.ProducerRecord
+import org.apache.kafka.common.config.TopicConfig
 import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.requests.{FetchRequest, FetchResponse}
+import org.apache.kafka.server.config.ReplicationConfigs.INTER_BROKER_PROTOCOL_VERSION_CONFIG
 import org.junit.jupiter.api.Assertions.{assertEquals, assertTrue}
 import org.junit.jupiter.api.Test
-import java.util.Properties
 
+import java.util.Properties
 import org.apache.kafka.server.common.MetadataVersion.IBP_0_10_2_IV0
 
 import scala.annotation.nowarn
@@ -35,7 +36,7 @@ class FetchRequestWithLegacyMessageFormatTest extends BaseFetchRequestTest {
   override def brokerPropertyOverrides(properties: Properties): Unit = {
     super.brokerPropertyOverrides(properties)
     // legacy message formats are only supported with IBP < 3.0
-    properties.put(KafkaConfig.InterBrokerProtocolVersionProp, "2.8")
+    properties.put(INTER_BROKER_PROTOCOL_VERSION_CONFIG, "2.8")
   }
 
   /**
@@ -49,7 +50,7 @@ class FetchRequestWithLegacyMessageFormatTest extends BaseFetchRequestTest {
     val maxPartitionBytes = 200
     // Fetch v2 down-converts if the message format is >= 0.11 and we want to avoid
     // that as it affects the size of the returned buffer
-    val topicConfig = Map(LogConfig.MessageFormatVersionProp -> IBP_0_10_2_IV0.version)
+    val topicConfig = Map(TopicConfig.MESSAGE_FORMAT_VERSION_CONFIG -> IBP_0_10_2_IV0.version)
     val (topicPartition, leaderId) = createTopics(numTopics = 1, numPartitions = 1, topicConfig).head
     val topicIds = getTopicIds().asJava
     val topicNames = topicIds.asScala.map(_.swap).asJava

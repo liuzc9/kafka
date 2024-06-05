@@ -253,7 +253,11 @@ public final class Cluster {
     public Optional<Node> nodeIfOnline(TopicPartition partition, int id) {
         Node node = nodeById(id);
         PartitionInfo partitionInfo = partition(partition);
-        if (node != null && partitionInfo != null && !Arrays.asList(partitionInfo.offlineReplicas()).contains(node)) {
+
+        if (node != null && partitionInfo != null &&
+            !Arrays.asList(partitionInfo.offlineReplicas()).contains(node) &&
+            Arrays.asList(partitionInfo.replicas()).contains(node)) {
+
             return Optional.of(node);
         } else {
             return Optional.empty();
@@ -381,12 +385,13 @@ public final class Cluster {
                 Objects.equals(internalTopics, cluster.internalTopics) &&
                 Objects.equals(controller, cluster.controller) &&
                 Objects.equals(partitionsByTopicPartition, cluster.partitionsByTopicPartition) &&
-                Objects.equals(clusterResource, cluster.clusterResource);
+                Objects.equals(clusterResource, cluster.clusterResource) &&
+                Objects.equals(topicIds, cluster.topicIds);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(isBootstrapConfigured, nodes, unauthorizedTopics, invalidTopics, internalTopics, controller,
-                partitionsByTopicPartition, clusterResource);
+                partitionsByTopicPartition, clusterResource, topicIds);
     }
 }

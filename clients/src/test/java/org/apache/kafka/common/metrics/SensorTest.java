@@ -29,11 +29,9 @@ import org.apache.kafka.common.utils.Time;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -129,7 +127,7 @@ public class SensorTest {
     public void testExpiredSensor() {
         MetricConfig config = new MetricConfig();
         Time mockTime = new MockTime();
-        try (Metrics metrics = new Metrics(config, Arrays.asList(new JmxReporter()), mockTime, true)) {
+        try (Metrics metrics = new Metrics(config, Collections.singletonList(new JmxReporter()), mockTime, true)) {
             long inactiveSensorExpirationTimeSeconds = 60L;
             Sensor sensor = new Sensor(metrics, "sensor", null, config, mockTime,
                     inactiveSensorExpirationTimeSeconds, Sensor.RecordingLevel.INFO);
@@ -197,19 +195,16 @@ public class SensorTest {
         try {
             for (int i = 0; i != threadCount; ++i) {
                 final int index = i;
-                workers.add(service.submit(new Callable<Throwable>() {
-                    @Override
-                    public Throwable call() {
-                        try {
-                            assertTrue(latch.await(5, TimeUnit.SECONDS));
-                            for (int j = 0; j != 20; ++j) {
-                                sensor.record(j * index, System.currentTimeMillis() + j, false);
-                                sensor.checkQuotas();
-                            }
-                            return null;
-                        } catch (Throwable e) {
-                            return e;
+                workers.add(service.submit(() -> {
+                    try {
+                        assertTrue(latch.await(5, TimeUnit.SECONDS));
+                        for (int j = 0; j != 20; ++j) {
+                            sensor.record(j * index, System.currentTimeMillis() + j, false);
+                            sensor.checkQuotas();
                         }
+                        return null;
+                    } catch (Throwable e) {
+                        return e;
                     }
                 }));
             }

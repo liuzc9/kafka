@@ -94,14 +94,12 @@ public class ProduceRequest extends AbstractRequest {
 
         @Override
         public String toString() {
-            StringBuilder bld = new StringBuilder();
-            bld.append("(type=ProduceRequest")
-                    .append(", acks=").append(data.acks())
-                    .append(", timeout=").append(data.timeoutMs())
-                    .append(", partitionRecords=(").append(data.topicData().stream().flatMap(d -> d.partitionData().stream()).collect(Collectors.toList()))
-                    .append("), transactionalId='").append(data.transactionalId() != null ? data.transactionalId() : "")
-                    .append("'");
-            return bld.toString();
+            return "(type=ProduceRequest" +
+                    ", acks=" + data.acks() +
+                    ", timeout=" + data.timeoutMs() +
+                    ", partitionRecords=(" + data.topicData().stream().flatMap(d -> d.partitionData().stream()).collect(Collectors.toList()) +
+                    "), transactionalId='" + (data.transactionalId() != null ? data.transactionalId() : "") +
+                    "'";
         }
     }
 
@@ -133,14 +131,15 @@ public class ProduceRequest extends AbstractRequest {
             // this method may be called by different thread (see the comment on data)
             synchronized (this) {
                 if (partitionSizes == null) {
-                    partitionSizes = new HashMap<>();
+                    Map<TopicPartition, Integer> tmpPartitionSizes = new HashMap<>();
                     data.topicData().forEach(topicData ->
                         topicData.partitionData().forEach(partitionData ->
-                            partitionSizes.compute(new TopicPartition(topicData.name(), partitionData.index()),
+                            tmpPartitionSizes.compute(new TopicPartition(topicData.name(), partitionData.index()),
                                 (ignored, previousValue) ->
                                     partitionData.records().sizeInBytes() + (previousValue == null ? 0 : previousValue))
                         )
                     );
+                    partitionSizes = tmpPartitionSizes;
                 }
             }
         }
@@ -230,7 +229,7 @@ public class ProduceRequest extends AbstractRequest {
                 Iterator<? extends RecordBatch> iterator = records.batches().iterator();
                 if (!iterator.hasNext())
                     throw new InvalidRecordException("Produce requests with version " + version + " must have at least " +
-                            "one record batch");
+                            "one record batch per partition");
 
                 RecordBatch entry = iterator.next();
                 if (entry.magic() != RecordBatch.MAGIC_VALUE_V2)
@@ -243,7 +242,7 @@ public class ProduceRequest extends AbstractRequest {
 
                 if (iterator.hasNext())
                     throw new InvalidRecordException("Produce requests with version " + version + " are only allowed to " +
-                            "contain exactly one record batch");
+                            "contain exactly one record batch per partition");
             }
         }
 

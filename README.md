@@ -4,10 +4,12 @@ See our [web site](https://kafka.apache.org) for details on the project.
 
 You need to have [Java](http://www.oracle.com/technetwork/java/javase/downloads/index.html) installed.
 
-We build and test Apache Kafka with Java 8, 11 and 17. We set the `release` parameter in javac and scalac
+We build and test Apache Kafka with Java 8, 11, 17 and 21. We set the `release` parameter in javac and scalac
 to `8` to ensure the generated binaries are compatible with Java 8 or higher (independently of the Java version
-used for compilation). Java 8 support has been deprecated since Apache Kafka 3.0 and will be removed in Apache
-Kafka 4.0 (see [KIP-750](https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=181308223) for more details).
+used for compilation). Java 8 support project-wide has been deprecated since Apache Kafka 3.0, Java 11 support for
+the broker and tools has been deprecated since Apache Kafka 3.7 and removal of both is planned for Apache Kafka 4.0 (
+see [KIP-750](https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=181308223) and
+[KIP-1013](https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=284789510) for more details).
 
 Scala 2.12 and 2.13 are supported and 2.13 is used by default. Scala 2.12 support has been deprecated since
 Apache Kafka 3.0 and will be removed in Apache Kafka 4.0 (see [KIP-751](https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=181308218)
@@ -37,24 +39,29 @@ Follow instructions in https://kafka.apache.org/quickstart
     ./gradlew integrationTest
     
 ### Force re-running tests without code change ###
-    ./gradlew -Prerun-tests test
-    ./gradlew -Prerun-tests unitTest
-    ./gradlew -Prerun-tests integrationTest
+    ./gradlew test --rerun
+    ./gradlew unitTest --rerun
+    ./gradlew integrationTest --rerun
 
 ### Running a particular unit/integration test ###
     ./gradlew clients:test --tests RequestResponseTest
 
 ### Repeatedly running a particular unit/integration test ###
-    I=0; while ./gradlew clients:test -Prerun-tests --tests RequestResponseTest --fail-fast; do (( I=$I+1 )); echo "Completed run: $I"; sleep 1; done
+    I=0; while ./gradlew clients:test --tests RequestResponseTest --rerun --fail-fast; do (( I=$I+1 )); echo "Completed run: $I"; sleep 1; done
 
 ### Running a particular test method within a unit/integration test ###
     ./gradlew core:test --tests kafka.api.ProducerFailureHandlingTest.testCannotSendToInternalTopic
     ./gradlew clients:test --tests org.apache.kafka.clients.MetadataTest.testTimeToNextUpdate
 
 ### Running a particular unit/integration test with log4j output ###
-Change the log4j setting in either `clients/src/test/resources/log4j.properties` or `core/src/test/resources/log4j.properties`
+By default, there will be only small number of logs output while testing. You can adjust it by changing the `log4j.properties` file in the module's `src/test/resources` directory.
 
-    ./gradlew clients:test --tests RequestResponseTest
+For example, if you want to see more logs for clients project tests, you can modify [the line](https://github.com/apache/kafka/blob/trunk/clients/src/test/resources/log4j.properties#L21) in `clients/src/test/resources/log4j.properties` 
+to `log4j.logger.org.apache.kafka=INFO` and then run:
+    
+    ./gradlew cleanTest clients:test --tests NetworkClientTest   
+
+And you should see `INFO` level logs in the file under the `clients/build/test-results/test` directory.
 
 ### Specifying test retries ###
 By default, each failed test is retried once up to a maximum of five retries per test run. Tests are retried at the end of the test task. Adjust these parameters in the following way:
@@ -83,14 +90,26 @@ fail due to code changes. You can just run:
  
     ./gradlew processMessages processTestMessages
 
+### Running a Kafka broker in KRaft mode
+
+Using compiled files:
+
+    KAFKA_CLUSTER_ID="$(./bin/kafka-storage.sh random-uuid)"
+    ./bin/kafka-storage.sh format -t $KAFKA_CLUSTER_ID -c config/kraft/server.properties
+    ./bin/kafka-server-start.sh config/kraft/server.properties
+
+Using docker image:
+
+    docker run -p 9092:9092 apache/kafka:3.7.0
+
 ### Running a Kafka broker in ZooKeeper mode
+
+Using compiled files:
 
     ./bin/zookeeper-server-start.sh config/zookeeper.properties
     ./bin/kafka-server-start.sh config/server.properties
 
-### Running a Kafka broker in KRaft (Kafka Raft metadata) mode
-
-See [config/kraft/README.md](https://github.com/apache/kafka/blob/trunk/config/kraft/README.md).
+>Since ZooKeeper mode is already deprecated and planned to be removed in Apache Kafka 4.0, the docker image only supports running in KRaft mode
 
 ### Cleaning the build ###
     ./gradlew clean
@@ -194,18 +213,12 @@ For backwards compatibility, the following also works:
 
 ### Installing specific projects to the local Maven repository ###
 
-    ./gradlew -PskipSigning :streams:publishToMavenLocal
+    ./gradlew -PskipSigning=true :streams:publishToMavenLocal
     
 If needed, you can specify the Scala version with `-PscalaVersion=2.13`.
 
 ### Building the test jar ###
     ./gradlew testJar
-
-### Determining how transitive dependencies are added ###
-    ./gradlew core:dependencies --configuration runtime
-
-### Determining if any dependencies could be updated ###
-    ./gradlew dependencyUpdates
 
 ### Running code quality checks ###
 There are two code quality analysis tools that we regularly run, spotbugs and checkstyle.
@@ -214,10 +227,15 @@ There are two code quality analysis tools that we regularly run, spotbugs and ch
 Checkstyle enforces a consistent coding style in Kafka.
 You can run checkstyle using:
 
-    ./gradlew checkstyleMain checkstyleTest
+    ./gradlew checkstyleMain checkstyleTest spotlessCheck
 
 The checkstyle warnings will be found in `reports/checkstyle/reports/main.html` and `reports/checkstyle/reports/test.html` files in the
 subproject build directories. They are also printed to the console. The build will fail if Checkstyle fails.
+
+#### Spotless ####
+The import order is a part of static check. please call `spotlessApply` to optimize the imports of Java codes before filing pull request :
+
+    ./gradlew spotlessApply
 
 #### Spotbugs ####
 Spotbugs uses static analysis to look for bugs in the code.
@@ -232,6 +250,21 @@ directories.  Use -PxmlSpotBugsReport=true to generate an XML report instead of 
 We use [JMH](https://openjdk.java.net/projects/code-tools/jmh/) to write microbenchmarks that produce reliable results in the JVM.
     
 See [jmh-benchmarks/README.md](https://github.com/apache/kafka/blob/trunk/jmh-benchmarks/README.md) for details on how to run the microbenchmarks.
+
+### Dependency Analysis ###
+
+The gradle [dependency debugging documentation](https://docs.gradle.org/current/userguide/viewing_debugging_dependencies.html) mentions using the `dependencies` or `dependencyInsight` tasks to debug dependencies for the root project or individual subprojects.
+
+Alternatively, use the `allDeps` or `allDepInsight` tasks for recursively iterating through all subprojects:
+
+    ./gradlew allDeps
+
+    ./gradlew allDepInsight --configuration runtimeClasspath --dependency com.fasterxml.jackson.core:jackson-databind
+
+These take the same arguments as the builtin variants.
+
+### Determining if any dependencies could be updated ###
+    ./gradlew dependencyUpdates
 
 ### Common build options ###
 
@@ -252,6 +285,10 @@ available to the JVM. The value must be between 1 and 16 (inclusive).
 * `enableTestCoverage`: enables test coverage plugins and tasks, including bytecode enhancement of classes required to track said
 coverage. Note that this introduces some overhead when running tests and hence why it's disabled by default (the overhead
 varies, but 15-20% is a reasonable estimate).
+* `keepAliveMode`: configures the keep alive mode for the Gradle compilation daemon - reuse improves start-up time. The values should 
+be one of `daemon` or `session` (the default is `daemon`). `daemon` keeps the daemon alive until it's explicitly stopped while
+`session` keeps it alive until the end of the build session. This currently only affects the Scala compiler, see
+https://github.com/gradle/gradle/pull/21034 for a PR that attempts to do the same for the Java compiler.
 * `scalaOptimizerMode`: configures the optimizing behavior of the scala compiler, the value should be one of `none`, `method`, `inline-kafka` or
 `inline-scala` (the default is `inline-kafka`). `none` is the scala compiler default, which only eliminates unreachable code. `method` also
 includes method-local optimizations. `inline-kafka` adds inlining of methods within the kafka packages. Finally, `inline-scala` also
@@ -259,18 +296,6 @@ includes inlining of methods within the scala library (which avoids lambda alloc
 only safe if the Scala library version is the same at compile time and runtime. Since we cannot guarantee this for all cases (for example, users
 may depend on the kafka jar for integration tests where they may include a scala library with a different version), we don't enable it by
 default. See https://www.lightbend.com/blog/scala-inliner-optimizer for more details.
-
-### Dependency Analysis ###
-
-The gradle [dependency debugging documentation](https://docs.gradle.org/current/userguide/viewing_debugging_dependencies.html) mentions using the `dependencies` or `dependencyInsight` tasks to debug dependencies for the root project or individual subprojects.
-
-Alternatively, use the `allDeps` or `allDepInsight` tasks for recursively iterating through all subprojects:
-
-    ./gradlew allDeps
-
-    ./gradlew allDepInsight --configuration runtimeClasspath --dependency com.fasterxml.jackson.core:jackson-databind
-
-These take the same arguments as the builtin variants.
 
 ### Running system tests ###
 
@@ -285,4 +310,4 @@ See [vagrant/README.md](vagrant/README.md).
 Apache Kafka is interested in building the community; we would welcome any thoughts or [patches](https://issues.apache.org/jira/browse/KAFKA). You can reach us [on the Apache mailing lists](http://kafka.apache.org/contact.html).
 
 To contribute follow the instructions here:
- * https://kafka.apache.org/contributing.html
+ * https://kafka.apache.org/contributing.html 

@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.streams.processor.internals;
 
+import java.time.Duration;
 import org.apache.kafka.clients.consumer.OffsetResetStrategy;
 import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.serialization.Serde;
@@ -77,12 +78,13 @@ import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 public class InternalTopologyBuilderTest {
 
     private final Serde<String> stringSerde = Serdes.String();
     private final InternalTopologyBuilder builder = new InternalTopologyBuilder();
-    private final StoreBuilder<?> storeBuilder = new MockKeyValueStoreBuilder("testStore", false);
+    private final StoreFactory storeBuilder = new MockKeyValueStoreBuilder("testStore", false).asFactory();
 
     @Test
     public void shouldAddSourceWithOffsetReset() {
@@ -212,14 +214,16 @@ public class InternalTopologyBuilderTest {
         final IllegalArgumentException exception = assertThrows(
                 IllegalArgumentException.class,
             () -> builder.addGlobalStore(
-                        new MockKeyValueStoreBuilder("global-store", false).withLoggingDisabled(),
+                        new MockKeyValueStoreBuilder("global-store", false).asFactory().withLoggingDisabled(),
                         "globalSource",
                         null,
                         null,
                         null,
                         "globalTopic",
                         "global-processor",
-                () -> processor)
+                () -> processor,
+                false
+            )
         );
         assertThat(exception.getMessage(), containsString("#get() must return a new object each time it is called."));
     }
@@ -320,14 +324,15 @@ public class InternalTopologyBuilderTest {
         builder.addSource(null, "source-1", null, null, null, Pattern.compile("topic-1"));
         builder.addSource(null, "source-2", null, null, null, Pattern.compile("topic-2"));
         builder.addGlobalStore(
-            new MockKeyValueStoreBuilder("global-store", false).withLoggingDisabled(),
+            new MockKeyValueStoreBuilder("global-store", false).asFactory().withLoggingDisabled(),
             "globalSource",
             null,
             null,
             null,
             "globalTopic",
             "global-processor",
-            new MockApiProcessorSupplier<>()
+            new MockApiProcessorSupplier<>(),
+            false
         );
         builder.initializeSubscription();
 
@@ -344,14 +349,15 @@ public class InternalTopologyBuilderTest {
         builder.addSource(null, "source-1", null, null, null, "topic-1");
         builder.addSource(null, "source-2", null, null, null, "topic-2");
         builder.addGlobalStore(
-            new MockKeyValueStoreBuilder("global-store", false).withLoggingDisabled(),
+            new MockKeyValueStoreBuilder("global-store", false).asFactory().withLoggingDisabled(),
             "globalSource",
             null,
             null,
             null,
             "globalTopic",
             "global-processor",
-            new MockApiProcessorSupplier<>()
+            new MockApiProcessorSupplier<>(),
+            false
         );
         builder.initializeSubscription();
 
@@ -452,8 +458,8 @@ public class InternalTopologyBuilderTest {
 
     @Test
     public void shouldNotAllowToAddStoresWithSameNameWhenFirstStoreIsGlobal() {
-        final StoreBuilder<KeyValueStore<Object, Object>> globalBuilder =
-            new MockKeyValueStoreBuilder("testStore", false).withLoggingDisabled();
+        final StoreFactory globalBuilder =
+            new MockKeyValueStoreBuilder("testStore", false).asFactory().withLoggingDisabled();
 
         builder.addGlobalStore(
             globalBuilder,
@@ -463,7 +469,8 @@ public class InternalTopologyBuilderTest {
             null,
             "global-topic",
             "global-processor",
-            new MockApiProcessorSupplier<>()
+            new MockApiProcessorSupplier<>(),
+            false
         );
 
         final TopologyException exception = assertThrows(
@@ -479,8 +486,8 @@ public class InternalTopologyBuilderTest {
 
     @Test
     public void shouldNotAllowToAddStoresWithSameNameWhenSecondStoreIsGlobal() {
-        final StoreBuilder<KeyValueStore<Object, Object>> globalBuilder =
-            new MockKeyValueStoreBuilder("testStore", false).withLoggingDisabled();
+        final StoreFactory globalBuilder =
+            new MockKeyValueStoreBuilder("testStore", false).asFactory().withLoggingDisabled();
 
         builder.addStateStore(storeBuilder);
 
@@ -494,7 +501,8 @@ public class InternalTopologyBuilderTest {
                 null,
                 "global-topic",
                 "global-processor",
-                new MockApiProcessorSupplier<>()
+                new MockApiProcessorSupplier<>(),
+                false
             )
         );
 
@@ -506,10 +514,10 @@ public class InternalTopologyBuilderTest {
 
     @Test
     public void shouldNotAllowToAddGlobalStoresWithSameName() {
-        final StoreBuilder<KeyValueStore<Object, Object>> firstGlobalBuilder =
-            new MockKeyValueStoreBuilder("testStore", false).withLoggingDisabled();
-        final StoreBuilder<KeyValueStore<Object, Object>> secondGlobalBuilder =
-            new MockKeyValueStoreBuilder("testStore", false).withLoggingDisabled();
+        final StoreFactory firstGlobalBuilder =
+            new MockKeyValueStoreBuilder("testStore", false).asFactory().withLoggingDisabled();
+        final StoreFactory secondGlobalBuilder =
+            new MockKeyValueStoreBuilder("testStore", false).asFactory().withLoggingDisabled();
 
         builder.addGlobalStore(
             firstGlobalBuilder,
@@ -519,7 +527,8 @@ public class InternalTopologyBuilderTest {
             null,
             "global-topic",
             "global-processor",
-            new MockApiProcessorSupplier<>()
+            new MockApiProcessorSupplier<>(),
+            false
         );
 
         final TopologyException exception = assertThrows(
@@ -532,7 +541,8 @@ public class InternalTopologyBuilderTest {
                 null,
                 "global-topic",
                 "global-processor-2",
-                new MockApiProcessorSupplier<>()
+                new MockApiProcessorSupplier<>(),
+                false
             )
         );
 
@@ -637,15 +647,15 @@ public class InternalTopologyBuilderTest {
         expectedTopicGroups.put(SUBTOPOLOGY_0, new InternalTopologyBuilder.TopicsInfo(
             Collections.emptySet(), mkSet("topic-1", "topic-1x", "topic-2"),
             Collections.emptyMap(),
-            Collections.singletonMap(store1, new UnwindowedChangelogTopicConfig(store1, Collections.emptyMap()))));
+            Collections.singletonMap(store1, new UnwindowedUnversionedChangelogTopicConfig(store1, Collections.emptyMap()))));
         expectedTopicGroups.put(SUBTOPOLOGY_1, new InternalTopologyBuilder.TopicsInfo(
             Collections.emptySet(), mkSet("topic-3", "topic-4"),
             Collections.emptyMap(),
-            Collections.singletonMap(store2, new UnwindowedChangelogTopicConfig(store2, Collections.emptyMap()))));
+            Collections.singletonMap(store2, new UnwindowedUnversionedChangelogTopicConfig(store2, Collections.emptyMap()))));
         expectedTopicGroups.put(SUBTOPOLOGY_2, new InternalTopologyBuilder.TopicsInfo(
             Collections.emptySet(), mkSet("topic-5"),
             Collections.emptyMap(),
-            Collections.singletonMap(store3, new UnwindowedChangelogTopicConfig(store3, Collections.emptyMap()))));
+            Collections.singletonMap(store3, new UnwindowedUnversionedChangelogTopicConfig(store3, Collections.emptyMap()))));
 
         assertEquals(3, topicGroups.size());
         assertEquals(expectedTopicGroups, topicGroups);
@@ -720,14 +730,15 @@ public class InternalTopologyBuilderTest {
 
         oldNodeGroups = newNodeGroups;
         builder.addGlobalStore(
-            new MockKeyValueStoreBuilder("global-store", false).withLoggingDisabled(),
+            new MockKeyValueStoreBuilder("global-store", false).asFactory().withLoggingDisabled(),
             "globalSource",
             null,
             null,
             null,
             "globalTopic",
             "global-processor",
-            new MockApiProcessorSupplier<>()
+            new MockApiProcessorSupplier<>(),
+            false
         );
         newNodeGroups = builder.nodeGroups();
         assertNotEquals(oldNodeGroups, newNodeGroups);
@@ -819,7 +830,7 @@ public class InternalTopologyBuilderTest {
 
     @Test
     public void shouldNotAddNullStateStoreSupplier() {
-        assertThrows(NullPointerException.class, () -> builder.addStateStore(null));
+        assertThrows(NullPointerException.class, () -> builder.addStateStore((StoreBuilder<?>) null));
     }
 
     private Set<String> nodeNames(final Collection<ProcessorNode<?, ?, ?, ?>> nodes) {
@@ -890,18 +901,43 @@ public class InternalTopologyBuilderTest {
         assertEquals(TopicConfig.CLEANUP_POLICY_COMPACT + "," + TopicConfig.CLEANUP_POLICY_DELETE, properties1.get(TopicConfig.CLEANUP_POLICY_CONFIG));
         assertEquals("40000", properties1.get(TopicConfig.RETENTION_MS_CONFIG));
         assertEquals("appId-store1-changelog", topicConfig1.name());
-        assertTrue(topicConfig1 instanceof WindowedChangelogTopicConfig);
+        assertInstanceOf(WindowedChangelogTopicConfig.class, topicConfig1);
         final InternalTopicConfig topicConfig2 = topicsInfo.stateChangelogTopics.get("appId-store2-changelog");
         final Map<String, String> properties2 = topicConfig2.getProperties(Collections.emptyMap(), 10000);
         assertEquals(3, properties2.size());
         assertEquals(TopicConfig.CLEANUP_POLICY_COMPACT + "," + TopicConfig.CLEANUP_POLICY_DELETE, properties2.get(TopicConfig.CLEANUP_POLICY_CONFIG));
         assertEquals("40000", properties2.get(TopicConfig.RETENTION_MS_CONFIG));
         assertEquals("appId-store2-changelog", topicConfig2.name());
-        assertTrue(topicConfig2 instanceof WindowedChangelogTopicConfig);
+        assertInstanceOf(WindowedChangelogTopicConfig.class, topicConfig2);
     }
 
     @Test
-    public void shouldAddInternalTopicConfigForNonWindowStores() {
+    public void shouldAddInternalTopicConfigForVersionedStores() {
+        builder.setApplicationId("appId");
+        builder.addSource(null, "source", null, null, null, "topic");
+        builder.addProcessor("processor", new MockApiProcessorSupplier<>(), "source");
+        builder.addStateStore(
+            Stores.versionedKeyValueStoreBuilder(
+                Stores.persistentVersionedKeyValueStore("vstore", Duration.ofMillis(60_000L)),
+                Serdes.String(),
+                Serdes.String()
+            ),
+            "processor"
+        );
+        builder.buildTopology();
+        final Map<Subtopology, InternalTopologyBuilder.TopicsInfo> topicGroups = builder.subtopologyToTopicsInfo();
+        final InternalTopologyBuilder.TopicsInfo topicsInfo = topicGroups.values().iterator().next();
+        final InternalTopicConfig topicConfig = topicsInfo.stateChangelogTopics.get("appId-vstore-changelog");
+        final Map<String, String> properties = topicConfig.getProperties(Collections.emptyMap(), 10000);
+        assertEquals(3, properties.size());
+        assertEquals(TopicConfig.CLEANUP_POLICY_COMPACT, properties.get(TopicConfig.CLEANUP_POLICY_CONFIG));
+        assertEquals(Long.toString(60_000L + 24 * 60 * 60 * 1000L), properties.get(TopicConfig.MIN_COMPACTION_LAG_MS_CONFIG));
+        assertEquals("appId-vstore-changelog", topicConfig.name());
+        assertInstanceOf(VersionedChangelogTopicConfig.class, topicConfig);
+    }
+
+    @Test
+    public void shouldAddInternalTopicConfigForNonWindowNonVersionedStores() {
         builder.setApplicationId("appId");
         builder.addSource(null, "source", null, null, null, "topic");
         builder.addProcessor("processor", new MockApiProcessorSupplier<>(), "source");
@@ -914,7 +950,7 @@ public class InternalTopologyBuilderTest {
         assertEquals(2, properties.size());
         assertEquals(TopicConfig.CLEANUP_POLICY_COMPACT, properties.get(TopicConfig.CLEANUP_POLICY_CONFIG));
         assertEquals("appId-testStore-changelog", topicConfig.name());
-        assertTrue(topicConfig instanceof UnwindowedChangelogTopicConfig);
+        assertInstanceOf(UnwindowedUnversionedChangelogTopicConfig.class, topicConfig);
     }
 
     @Test
@@ -930,7 +966,7 @@ public class InternalTopologyBuilderTest {
         assertEquals(String.valueOf(-1), properties.get(TopicConfig.RETENTION_MS_CONFIG));
         assertEquals(TopicConfig.CLEANUP_POLICY_DELETE, properties.get(TopicConfig.CLEANUP_POLICY_CONFIG));
         assertEquals("appId-foo", topicConfig.name());
-        assertTrue(topicConfig instanceof RepartitionTopicConfig);
+        assertInstanceOf(RepartitionTopicConfig.class, topicConfig);
     }
 
     @Test
@@ -966,9 +1002,22 @@ public class InternalTopologyBuilderTest {
     }
 
     @Test
+    @SuppressWarnings("deprecation")
+    public void shouldUseNonDeprecatedConfigToSetCacheBytesWhenBothDeprecatedAndNonDeprecatedConfigsUsed() {
+        final Properties globalProps = StreamsTestUtils.getStreamsConfig();
+        globalProps.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, 200L);
+        globalProps.put(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG, 100L);
+        final StreamsConfig globalStreamsConfig = new StreamsConfig(globalProps);
+        final InternalTopologyBuilder topologyBuilder = builder.rewriteTopology(globalStreamsConfig);
+        assertThat(topologyBuilder.topologyConfigs(), equalTo(new TopologyConfig(null, globalStreamsConfig, new Properties())));
+        assertThat(topologyBuilder.topologyConfigs().cacheSize, equalTo(200L));
+    }
+
+    @SuppressWarnings("deprecation")
+    @Test
     public void shouldOverrideGlobalStreamsConfigWhenGivenNamedTopologyProps() {
         final Properties topologyOverrides = new Properties();
-        topologyOverrides.put(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG, 12345L);
+        topologyOverrides.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, 12345L);
         topologyOverrides.put(StreamsConfig.MAX_TASK_IDLE_MS_CONFIG, 500L);
         topologyOverrides.put(StreamsConfig.TASK_TIMEOUT_MS_CONFIG, 1000L);
         topologyOverrides.put(StreamsConfig.BUFFERED_RECORDS_PER_PARTITION_CONFIG, 15);
@@ -996,7 +1045,7 @@ public class InternalTopologyBuilderTest {
     @Test
     public void shouldNotOverrideGlobalStreamsConfigWhenGivenUnnamedTopologyProps() {
         final Properties streamsProps = StreamsTestUtils.getStreamsConfig();
-        streamsProps.put(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG, 12345L);
+        streamsProps.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, 12345L);
         streamsProps.put(StreamsConfig.MAX_TASK_IDLE_MS_CONFIG, 500L);
         streamsProps.put(StreamsConfig.TASK_TIMEOUT_MS_CONFIG, 1000L);
         streamsProps.put(StreamsConfig.BUFFERED_RECORDS_PER_PARTITION_CONFIG, 15);
@@ -1113,7 +1162,8 @@ public class InternalTopologyBuilderTest {
             null,
             "anyTopicName",
             sameNameForSourceAndProcessor,
-            new MockApiProcessorSupplier<>()
+            new MockApiProcessorSupplier<>(),
+            false
         ));
     }
 
@@ -1250,14 +1300,15 @@ public class InternalTopologyBuilderTest {
         final String globalTopic = "global-topic";
         builder.setApplicationId("X");
         builder.addGlobalStore(
-            new MockKeyValueStoreBuilder(globalStoreName, false).withLoggingDisabled(),
+            new MockKeyValueStoreBuilder(globalStoreName, false).asFactory().withLoggingDisabled(),
             "globalSource",
             null,
             null,
             null,
             globalTopic,
             "global-processor",
-            new MockApiProcessorSupplier<>()
+            new MockApiProcessorSupplier<>(),
+            false
         );
         builder.initializeSubscription();
 

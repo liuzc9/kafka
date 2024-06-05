@@ -20,16 +20,22 @@ package kafka.log
 import java.io.File
 import java.nio.file.Files
 import java.util.Properties
-
-import kafka.server.{BrokerTopicStats, LogDirFailureChannel}
+import kafka.server.BrokerTopicStats
 import kafka.utils._
 import org.apache.kafka.common.TopicPartition
+import org.apache.kafka.common.compress.Compression
+import org.apache.kafka.common.config.TopicConfig
 import org.apache.kafka.common.record._
 import org.apache.kafka.common.utils.Utils
+import org.apache.kafka.coordinator.transaction.TransactionLogConfigs
+import org.apache.kafka.server.util.MockTime
+import org.apache.kafka.storage.internals.log.{AppendOrigin, LogConfig, LogDirFailureChannel, LogSegment, LogSegments, LogStartOffsetIncrementReason, ProducerStateManager, ProducerStateManagerConfig}
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.{AfterEach, Test}
 
+import java.util
 import scala.collection.mutable
+import scala.compat.java8.OptionConverters._
 
 /**
   * Unit tests for the log cleaning logic
@@ -43,12 +49,13 @@ class LogCleanerManagerTest extends Logging {
   val topicPartition = new TopicPartition("log", 0)
   val topicPartition2 = new TopicPartition("log2", 0)
   val logProps = new Properties()
-  logProps.put(LogConfig.SegmentBytesProp, 1024: java.lang.Integer)
-  logProps.put(LogConfig.SegmentIndexBytesProp, 1024: java.lang.Integer)
-  logProps.put(LogConfig.CleanupPolicyProp, LogConfig.Compact)
-  val logConfig: LogConfig = LogConfig(logProps)
+  logProps.put(TopicConfig.SEGMENT_BYTES_CONFIG, 1024: java.lang.Integer)
+  logProps.put(TopicConfig.SEGMENT_INDEX_BYTES_CONFIG, 1024: java.lang.Integer)
+  logProps.put(TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_COMPACT)
+  val logConfig: LogConfig = new LogConfig(logProps)
   val time = new MockTime(1400000000000L, 1000L)  // Tue May 13 16:53:20 UTC 2014 for `currentTimeMs`
   val offset = 999
+  val producerStateManagerConfig = new ProducerStateManagerConfig(TransactionLogConfigs.PRODUCER_ID_EXPIRATION_MS_DEFAULT, false)
 
   val cleanerCheckpoints: mutable.Map[TopicPartition, Long] = mutable.Map[TopicPartition, Long]()
 
@@ -80,7 +87,7 @@ class LogCleanerManagerTest extends Logging {
     var numBatches = startNumBatches
 
     for (tp <- partitions) {
-      val log = createLog(2048, LogConfig.Compact, topicPartition = tp)
+      val log = createLog(2048, TopicConfig.CLEANUP_POLICY_COMPACT, topicPartition = tp)
       logs.put(tp, log)
 
       writeRecords(log, numBatches = numBatches, recordsPerBatch = 1, batchesPerSegment = 5)
@@ -97,13 +104,12 @@ class LogCleanerManagerTest extends Logging {
     val tpDir = new File(logDir, "A-1")
     Files.createDirectories(tpDir.toPath)
     val logDirFailureChannel = new LogDirFailureChannel(10)
-    val config = createLowRetentionLogConfig(logSegmentSize, LogConfig.Compact)
+    val config = createLowRetentionLogConfig(logSegmentSize, TopicConfig.CLEANUP_POLICY_COMPACT)
     val maxTransactionTimeoutMs = 5 * 60 * 1000
-    val maxProducerIdExpirationMs = 60 * 60 * 1000
-    val producerIdExpirationCheckIntervalMs = kafka.server.Defaults.ProducerIdExpirationCheckIntervalMs
+    val producerIdExpirationCheckIntervalMs = TransactionLogConfigs.PRODUCER_ID_EXPIRATION_CHECK_INTERVAL_MS_DEFAULT
     val segments = new LogSegments(tp)
     val leaderEpochCache = UnifiedLog.maybeCreateLeaderEpochCache(tpDir, topicPartition, logDirFailureChannel, config.recordVersion, "")
-    val producerStateManager = new ProducerStateManager(topicPartition, tpDir, maxTransactionTimeoutMs, maxProducerIdExpirationMs, time)
+    val producerStateManager = new ProducerStateManager(topicPartition, tpDir, maxTransactionTimeoutMs, producerStateManagerConfig, time)
     val offsets = new LogLoader(
       tpDir,
       tp,
@@ -115,7 +121,7 @@ class LogCleanerManagerTest extends Logging {
       segments,
       0L,
       0L,
-      leaderEpochCache,
+      leaderEpochCache.asJava,
       producerStateManager
     ).load()
     val localLog = new LocalLog(tpDir, config, segments, offsets.recoveryPoint,
@@ -125,7 +131,7 @@ class LogCleanerManagerTest extends Logging {
         producerIdExpirationCheckIntervalMs, leaderEpochCache,
         producerStateManager, _topicId = None, keepPartitionMetadataFile = true) {
       // Throw an error in getFirstBatchTimestampForSegments since it is called in grabFilthiestLog()
-      override def getFirstBatchTimestampForSegments(segments: Iterable[LogSegment]): Iterable[Long] =
+      override def getFirstBatchTimestampForSegments(segments: util.Collection[LogSegment]): util.Collection[java.lang.Long] =
         throw new IllegalStateException("Error!")
     }
 
@@ -236,7 +242,7 @@ class LogCleanerManagerTest extends Logging {
     val tp = new TopicPartition("foo", 0)
     val logs = setupIncreasinglyFilthyLogs(Seq(tp), startNumBatches = 20, batchIncrement = 5)
 
-    logs.get(tp).maybeIncrementLogStartOffset(10L, ClientRecordDeletion)
+    logs.get(tp).maybeIncrementLogStartOffset(10L, LogStartOffsetIncrementReason.ClientRecordDeletion)
 
     val cleanerManager = createCleanerManagerMock(logs)
     cleanerCheckpoints.put(tp, 0L)
@@ -248,7 +254,7 @@ class LogCleanerManagerTest extends Logging {
   @Test
   def testLogStartOffsetLargerThanActiveSegmentBaseOffset(): Unit = {
     val tp = new TopicPartition("foo", 0)
-    val log = createLog(segmentSize = 2048, LogConfig.Compact, tp)
+    val log = createLog(segmentSize = 2048, TopicConfig.CLEANUP_POLICY_COMPACT, tp)
 
     val logs = new Pool[TopicPartition, UnifiedLog]()
     logs.put(tp, log)
@@ -259,7 +265,7 @@ class LogCleanerManagerTest extends Logging {
 
     assertEquals(1, log.logSegments.size)
 
-    log.maybeIncrementLogStartOffset(2L, ClientRecordDeletion)
+    log.maybeIncrementLogStartOffset(2L, LogStartOffsetIncrementReason.ClientRecordDeletion)
 
     val cleanerManager = createCleanerManagerMock(logs)
     cleanerCheckpoints.put(tp, 0L)
@@ -278,7 +284,7 @@ class LogCleanerManagerTest extends Logging {
     val tp = new TopicPartition("foo", 0)
 
     val logs = new Pool[TopicPartition, UnifiedLog]()
-    val log = createLog(2048, LogConfig.Compact, topicPartition = tp)
+    val log = createLog(2048, TopicConfig.CLEANUP_POLICY_COMPACT, topicPartition = tp)
     logs.put(tp, log)
 
     appendRecords(log, numRecords = 3)
@@ -303,7 +309,7 @@ class LogCleanerManagerTest extends Logging {
   @Test
   def testLogsWithSegmentsToDeleteShouldNotConsiderCleanupPolicyDeleteLogs(): Unit = {
     val records = TestUtils.singletonRecords("test".getBytes)
-    val log: UnifiedLog = createLog(records.sizeInBytes * 5, LogConfig.Delete)
+    val log: UnifiedLog = createLog(records.sizeInBytes * 5, TopicConfig.CLEANUP_POLICY_DELETE)
     val cleanerManager: LogCleanerManager = createCleanerManager(log)
 
     val readyToDelete = cleanerManager.deletableLogs().size
@@ -316,7 +322,7 @@ class LogCleanerManagerTest extends Logging {
   @Test
   def testLogsWithSegmentsToDeleteShouldConsiderCleanupPolicyCompactDeleteLogs(): Unit = {
     val records = TestUtils.singletonRecords("test".getBytes, key="test".getBytes)
-    val log: UnifiedLog = createLog(records.sizeInBytes * 5, LogConfig.Compact + "," + LogConfig.Delete)
+    val log: UnifiedLog = createLog(records.sizeInBytes * 5, TopicConfig.CLEANUP_POLICY_COMPACT + "," + TopicConfig.CLEANUP_POLICY_DELETE)
     val cleanerManager: LogCleanerManager = createCleanerManager(log)
 
     val readyToDelete = cleanerManager.deletableLogs().size
@@ -330,7 +336,7 @@ class LogCleanerManagerTest extends Logging {
   @Test
   def testLogsWithSegmentsToDeleteShouldConsiderCleanupPolicyCompactLogs(): Unit = {
     val records = TestUtils.singletonRecords("test".getBytes, key="test".getBytes)
-    val log: UnifiedLog = createLog(records.sizeInBytes * 5, LogConfig.Compact)
+    val log: UnifiedLog = createLog(records.sizeInBytes * 5, TopicConfig.CLEANUP_POLICY_COMPACT)
     val cleanerManager: LogCleanerManager = createCleanerManager(log)
 
     val readyToDelete = cleanerManager.deletableLogs().size
@@ -343,7 +349,7 @@ class LogCleanerManagerTest extends Logging {
   @Test
   def testLogsUnderCleanupIneligibleForCompaction(): Unit = {
     val records = TestUtils.singletonRecords("test".getBytes, key="test".getBytes)
-    val log: UnifiedLog = createLog(records.sizeInBytes * 5, LogConfig.Delete)
+    val log: UnifiedLog = createLog(records.sizeInBytes * 5, TopicConfig.CLEANUP_POLICY_DELETE)
     val cleanerManager: LogCleanerManager = createCleanerManager(log)
 
     log.appendAsLeader(records, leaderEpoch = 0)
@@ -357,11 +363,11 @@ class LogCleanerManagerTest extends Logging {
 
     // change cleanup policy from delete to compact
     val logProps = new Properties()
-    logProps.put(LogConfig.SegmentBytesProp, log.config.segmentSize)
-    logProps.put(LogConfig.RetentionMsProp, log.config.retentionMs)
-    logProps.put(LogConfig.CleanupPolicyProp, LogConfig.Compact)
-    logProps.put(LogConfig.MinCleanableDirtyRatioProp, 0: Integer)
-    val config = LogConfig(logProps)
+    logProps.put(TopicConfig.SEGMENT_BYTES_CONFIG, log.config.segmentSize: Integer)
+    logProps.put(TopicConfig.RETENTION_MS_CONFIG, log.config.retentionMs: java.lang.Long)
+    logProps.put(TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_COMPACT)
+    logProps.put(TopicConfig.MIN_CLEANABLE_DIRTY_RATIO_CONFIG, 0: Integer)
+    val config = new LogConfig(logProps)
     log.updateConfig(config)
 
     // log cleanup inprogress, the log is not available for compaction
@@ -374,8 +380,8 @@ class LogCleanerManagerTest extends Logging {
     assertEquals(1, cleanable2.size, "should have 1 logs ready to be compacted")
 
     // update cleanup policy to delete
-    logProps.put(LogConfig.CleanupPolicyProp, LogConfig.Delete)
-    val config2 = LogConfig(logProps)
+    logProps.put(TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_DELETE)
+    val config2 = new LogConfig(logProps)
     log.updateConfig(config2)
 
     // compaction in progress, should have 0 log eligible for log cleanup
@@ -391,7 +397,7 @@ class LogCleanerManagerTest extends Logging {
   @Test
   def testUpdateCheckpointsShouldAddOffsetToPartition(): Unit = {
     val records = TestUtils.singletonRecords("test".getBytes, key="test".getBytes)
-    val log: UnifiedLog = createLog(records.sizeInBytes * 5, LogConfig.Compact)
+    val log: UnifiedLog = createLog(records.sizeInBytes * 5, TopicConfig.CLEANUP_POLICY_COMPACT)
     val cleanerManager: LogCleanerManager = createCleanerManager(log)
 
     // expect the checkpoint offset is not the expectedOffset before doing updateCheckpoints
@@ -405,7 +411,7 @@ class LogCleanerManagerTest extends Logging {
   @Test
   def testUpdateCheckpointsShouldRemovePartitionData(): Unit = {
     val records = TestUtils.singletonRecords("test".getBytes, key="test".getBytes)
-    val log: UnifiedLog = createLog(records.sizeInBytes * 5, LogConfig.Compact)
+    val log: UnifiedLog = createLog(records.sizeInBytes * 5, TopicConfig.CLEANUP_POLICY_COMPACT)
     val cleanerManager: LogCleanerManager = createCleanerManager(log)
 
     // write some data into the cleaner-offset-checkpoint file
@@ -420,7 +426,7 @@ class LogCleanerManagerTest extends Logging {
   @Test
   def testHandleLogDirFailureShouldRemoveDirAndData(): Unit = {
     val records = TestUtils.singletonRecords("test".getBytes, key="test".getBytes)
-    val log: UnifiedLog = createLog(records.sizeInBytes * 5, LogConfig.Compact)
+    val log: UnifiedLog = createLog(records.sizeInBytes * 5, TopicConfig.CLEANUP_POLICY_COMPACT)
     val cleanerManager: LogCleanerManager = createCleanerManager(log)
 
     // write some data into the cleaner-offset-checkpoint file in logDir and logDir2
@@ -438,7 +444,7 @@ class LogCleanerManagerTest extends Logging {
   @Test
   def testMaybeTruncateCheckpointShouldTruncateData(): Unit = {
     val records = TestUtils.singletonRecords("test".getBytes, key="test".getBytes)
-    val log: UnifiedLog = createLog(records.sizeInBytes * 5, LogConfig.Compact)
+    val log: UnifiedLog = createLog(records.sizeInBytes * 5, TopicConfig.CLEANUP_POLICY_COMPACT)
     val cleanerManager: LogCleanerManager = createCleanerManager(log)
     val lowerOffset = 1L
     val higherOffset = 1000L
@@ -458,7 +464,7 @@ class LogCleanerManagerTest extends Logging {
   @Test
   def testAlterCheckpointDirShouldRemoveDataInSrcDirAndAddInNewDir(): Unit = {
     val records = TestUtils.singletonRecords("test".getBytes, key="test".getBytes)
-    val log: UnifiedLog = createLog(records.sizeInBytes * 5, LogConfig.Compact)
+    val log: UnifiedLog = createLog(records.sizeInBytes * 5, TopicConfig.CLEANUP_POLICY_COMPACT)
     val cleanerManager: LogCleanerManager = createCleanerManager(log)
 
     // write some data into the cleaner-offset-checkpoint file in logDir
@@ -481,7 +487,7 @@ class LogCleanerManagerTest extends Logging {
   @Test
   def testConcurrentLogCleanupAndLogTruncation(): Unit = {
     val records = TestUtils.singletonRecords("test".getBytes, key="test".getBytes)
-    val log: UnifiedLog = createLog(records.sizeInBytes * 5, LogConfig.Delete)
+    val log: UnifiedLog = createLog(records.sizeInBytes * 5, TopicConfig.CLEANUP_POLICY_DELETE)
     val cleanerManager: LogCleanerManager = createCleanerManager(log)
 
     // log cleanup starts
@@ -501,7 +507,7 @@ class LogCleanerManagerTest extends Logging {
   @Test
   def testConcurrentLogCleanupAndTopicDeletion(): Unit = {
     val records = TestUtils.singletonRecords("test".getBytes, key = "test".getBytes)
-    val log: UnifiedLog = createLog(records.sizeInBytes * 5, LogConfig.Delete)
+    val log: UnifiedLog = createLog(records.sizeInBytes * 5, TopicConfig.CLEANUP_POLICY_DELETE)
     val cleanerManager: LogCleanerManager = createCleanerManager(log)
 
     // log cleanup starts
@@ -521,7 +527,7 @@ class LogCleanerManagerTest extends Logging {
   @Test
   def testLogsWithSegmentsToDeleteShouldNotConsiderUncleanablePartitions(): Unit = {
     val records = TestUtils.singletonRecords("test".getBytes, key="test".getBytes)
-    val log: UnifiedLog = createLog(records.sizeInBytes * 5, LogConfig.Compact)
+    val log: UnifiedLog = createLog(records.sizeInBytes * 5, TopicConfig.CLEANUP_POLICY_COMPACT)
     val cleanerManager: LogCleanerManager = createCleanerManager(log)
     cleanerManager.markPartitionUncleanable(log.dir.getParent, topicPartition)
 
@@ -535,11 +541,11 @@ class LogCleanerManagerTest extends Logging {
   @Test
   def testCleanableOffsetsForNone(): Unit = {
     val logProps = new Properties()
-    logProps.put(LogConfig.SegmentBytesProp, 1024: java.lang.Integer)
+    logProps.put(TopicConfig.SEGMENT_BYTES_CONFIG, 1024: java.lang.Integer)
 
     val log = makeLog(config = LogConfig.fromProps(logConfig.originals, logProps))
 
-    while(log.numberOfSegments < 8)
+    while (log.numberOfSegments < 8)
       log.appendAsLeader(records(log.logEndOffset.toInt, log.logEndOffset.toInt, time.milliseconds()), leaderEpoch = 0)
 
     log.updateHighWatermark(50)
@@ -557,11 +563,11 @@ class LogCleanerManagerTest extends Logging {
   @Test
   def testCleanableOffsetsActiveSegment(): Unit = {
     val logProps = new Properties()
-    logProps.put(LogConfig.SegmentBytesProp, 1024: java.lang.Integer)
+    logProps.put(TopicConfig.SEGMENT_BYTES_CONFIG, 1024: java.lang.Integer)
 
     val log = makeLog(config = LogConfig.fromProps(logConfig.originals, logProps))
 
-    while(log.numberOfSegments < 8)
+    while (log.numberOfSegments < 8)
       log.appendAsLeader(records(log.logEndOffset.toInt, log.logEndOffset.toInt, time.milliseconds()), leaderEpoch = 0)
 
     log.updateHighWatermark(log.logEndOffset)
@@ -579,13 +585,13 @@ class LogCleanerManagerTest extends Logging {
   def testCleanableOffsetsForTime(): Unit = {
     val compactionLag = 60 * 60 * 1000
     val logProps = new Properties()
-    logProps.put(LogConfig.SegmentBytesProp, 1024: java.lang.Integer)
-    logProps.put(LogConfig.MinCompactionLagMsProp, compactionLag: java.lang.Integer)
+    logProps.put(TopicConfig.SEGMENT_BYTES_CONFIG, 1024: java.lang.Integer)
+    logProps.put(TopicConfig.MIN_COMPACTION_LAG_MS_CONFIG, compactionLag: java.lang.Integer)
 
     val log = makeLog(config = LogConfig.fromProps(logConfig.originals, logProps))
 
     val t0 = time.milliseconds
-    while(log.numberOfSegments < 4)
+    while (log.numberOfSegments < 4)
       log.appendAsLeader(records(log.logEndOffset.toInt, log.logEndOffset.toInt, t0), leaderEpoch = 0)
 
     val activeSegAtT0 = log.activeSegment
@@ -612,8 +618,8 @@ class LogCleanerManagerTest extends Logging {
   def testCleanableOffsetsForShortTime(): Unit = {
     val compactionLag = 60 * 60 * 1000
     val logProps = new Properties()
-    logProps.put(LogConfig.SegmentBytesProp, 1024: java.lang.Integer)
-    logProps.put(LogConfig.MinCompactionLagMsProp, compactionLag: java.lang.Integer)
+    logProps.put(TopicConfig.SEGMENT_BYTES_CONFIG, 1024: java.lang.Integer)
+    logProps.put(TopicConfig.MIN_COMPACTION_LAG_MS_CONFIG, compactionLag: java.lang.Integer)
 
     val log = makeLog(config = LogConfig.fromProps(logConfig.originals, logProps))
 
@@ -635,13 +641,13 @@ class LogCleanerManagerTest extends Logging {
   def testCleanableOffsetsNeedsCheckpointReset(): Unit = {
     val tp = new TopicPartition("foo", 0)
     val logs = setupIncreasinglyFilthyLogs(Seq(tp), startNumBatches = 20, batchIncrement = 5)
-    logs.get(tp).maybeIncrementLogStartOffset(10L, ClientRecordDeletion)
+    logs.get(tp).maybeIncrementLogStartOffset(10L, LogStartOffsetIncrementReason.ClientRecordDeletion)
 
     var lastCleanOffset = Some(15L)
     var cleanableOffsets = LogCleanerManager.cleanableOffsets(logs.get(tp), lastCleanOffset, time.milliseconds)
     assertFalse(cleanableOffsets.forceUpdateCheckpoint, "Checkpoint offset should not be reset if valid")
 
-    logs.get(tp).maybeIncrementLogStartOffset(20L, ClientRecordDeletion)
+    logs.get(tp).maybeIncrementLogStartOffset(20L, LogStartOffsetIncrementReason.ClientRecordDeletion)
     cleanableOffsets = LogCleanerManager.cleanableOffsets(logs.get(tp), lastCleanOffset, time.milliseconds)
     assertTrue(cleanableOffsets.forceUpdateCheckpoint, "Checkpoint offset needs to be reset if less than log start offset")
 
@@ -654,18 +660,18 @@ class LogCleanerManagerTest extends Logging {
   def testUndecidedTransactionalDataNotCleanable(): Unit = {
     val compactionLag = 60 * 60 * 1000
     val logProps = new Properties()
-    logProps.put(LogConfig.SegmentBytesProp, 1024: java.lang.Integer)
-    logProps.put(LogConfig.MinCompactionLagMsProp, compactionLag: java.lang.Integer)
+    logProps.put(TopicConfig.SEGMENT_BYTES_CONFIG, 1024: java.lang.Integer)
+    logProps.put(TopicConfig.MIN_COMPACTION_LAG_MS_CONFIG, compactionLag: java.lang.Integer)
 
     val log = makeLog(config = LogConfig.fromProps(logConfig.originals, logProps))
 
     val producerId = 15L
     val producerEpoch = 0.toShort
     val sequence = 0
-    log.appendAsLeader(MemoryRecords.withTransactionalRecords(CompressionType.NONE, producerId, producerEpoch, sequence,
+    log.appendAsLeader(MemoryRecords.withTransactionalRecords(Compression.NONE, producerId, producerEpoch, sequence,
       new SimpleRecord(time.milliseconds(), "1".getBytes, "a".getBytes),
       new SimpleRecord(time.milliseconds(), "2".getBytes, "b".getBytes)), leaderEpoch = 0)
-    log.appendAsLeader(MemoryRecords.withTransactionalRecords(CompressionType.NONE, producerId, producerEpoch, sequence + 2,
+    log.appendAsLeader(MemoryRecords.withTransactionalRecords(Compression.NONE, producerId, producerEpoch, sequence + 2,
       new SimpleRecord(time.milliseconds(), "3".getBytes, "c".getBytes)), leaderEpoch = 0)
     log.roll()
     log.updateHighWatermark(3L)
@@ -678,7 +684,7 @@ class LogCleanerManagerTest extends Logging {
 
     log.appendAsLeader(MemoryRecords.withEndTransactionMarker(time.milliseconds(), producerId, producerEpoch,
       new EndTransactionMarker(ControlRecordType.ABORT, 15)), leaderEpoch = 0,
-      origin = AppendOrigin.Coordinator)
+      origin = AppendOrigin.COORDINATOR)
     log.roll()
     log.updateHighWatermark(4L)
 
@@ -698,9 +704,9 @@ class LogCleanerManagerTest extends Logging {
   @Test
   def testDoneCleaning(): Unit = {
     val logProps = new Properties()
-    logProps.put(LogConfig.SegmentBytesProp, 1024: java.lang.Integer)
+    logProps.put(TopicConfig.SEGMENT_BYTES_CONFIG, 1024: java.lang.Integer)
     val log = makeLog(config = LogConfig.fromProps(logConfig.originals, logProps))
-    while(log.numberOfSegments < 8)
+    while (log.numberOfSegments < 8)
       log.appendAsLeader(records(log.logEndOffset.toInt, log.logEndOffset.toInt, time.milliseconds()), leaderEpoch = 0)
 
     val cleanerManager: LogCleanerManager = createCleanerManager(log)
@@ -726,7 +732,7 @@ class LogCleanerManagerTest extends Logging {
   @Test
   def testDoneDeleting(): Unit = {
     val records = TestUtils.singletonRecords("test".getBytes, key="test".getBytes)
-    val log: UnifiedLog = createLog(records.sizeInBytes * 5, LogConfig.Compact + "," + LogConfig.Delete)
+    val log: UnifiedLog = createLog(records.sizeInBytes * 5, TopicConfig.CLEANUP_POLICY_COMPACT + "," + TopicConfig.CLEANUP_POLICY_DELETE)
     val cleanerManager: LogCleanerManager = createCleanerManager(log)
     val tp = new TopicPartition("log", 0)
 
@@ -752,7 +758,7 @@ class LogCleanerManagerTest extends Logging {
     val tp = new TopicPartition("foo", 0)
     val logs = setupIncreasinglyFilthyLogs(Seq(tp), startNumBatches = 20, batchIncrement = 5)
 
-    logs.get(tp).maybeIncrementLogStartOffset(20L, ClientRecordDeletion)
+    logs.get(tp).maybeIncrementLogStartOffset(20L, LogStartOffsetIncrementReason.ClientRecordDeletion)
     val cleanerManager = createCleanerManagerMock(logs)
     cleanerCheckpoints.put(tp, 15L)
 
@@ -773,7 +779,7 @@ class LogCleanerManagerTest extends Logging {
 
     // create two logs, one with an invalid offset, and one that is dirtier than the log with an invalid offset
     val logs = setupIncreasinglyFilthyLogs(partitions, startNumBatches = 20, batchIncrement = 5)
-    logs.get(tp0).maybeIncrementLogStartOffset(15L, ClientRecordDeletion)
+    logs.get(tp0).maybeIncrementLogStartOffset(15L, LogStartOffsetIncrementReason.ClientRecordDeletion)
     val cleanerManager = createCleanerManagerMock(logs)
     cleanerCheckpoints.put(tp0, 10L)
     cleanerCheckpoints.put(tp1, 5L)
@@ -808,8 +814,8 @@ class LogCleanerManagerTest extends Logging {
       time = time,
       brokerTopicStats = new BrokerTopicStats,
       maxTransactionTimeoutMs = 5 * 60 * 1000,
-      maxProducerIdExpirationMs = 60 * 60 * 1000,
-      producerIdExpirationCheckIntervalMs = kafka.server.Defaults.ProducerIdExpirationCheckIntervalMs,
+      producerStateManagerConfig = producerStateManagerConfig,
+      producerIdExpirationCheckIntervalMs = TransactionLogConfigs.PRODUCER_ID_EXPIRATION_CHECK_INTERVAL_MS_DEFAULT,
       logDirFailureChannel = new LogDirFailureChannel(10),
       topicId = None,
       keepPartitionMetadataFile = true)
@@ -817,12 +823,12 @@ class LogCleanerManagerTest extends Logging {
 
   private def createLowRetentionLogConfig(segmentSize: Int, cleanupPolicy: String): LogConfig = {
     val logProps = new Properties()
-    logProps.put(LogConfig.SegmentBytesProp, segmentSize: Integer)
-    logProps.put(LogConfig.RetentionMsProp, 1: Integer)
-    logProps.put(LogConfig.CleanupPolicyProp, cleanupPolicy)
-    logProps.put(LogConfig.MinCleanableDirtyRatioProp, 0.05: java.lang.Double) // small for easier and clearer tests
+    logProps.put(TopicConfig.SEGMENT_BYTES_CONFIG, segmentSize: Integer)
+    logProps.put(TopicConfig.RETENTION_MS_CONFIG, 1: Integer)
+    logProps.put(TopicConfig.CLEANUP_POLICY_CONFIG, cleanupPolicy)
+    logProps.put(TopicConfig.MIN_CLEANABLE_DIRTY_RATIO_CONFIG, 0.05: java.lang.Double) // small for easier and clearer tests
 
-    LogConfig(logProps)
+    new LogConfig(logProps)
   }
 
   private def writeRecords(log: UnifiedLog,
@@ -848,7 +854,7 @@ class LogCleanerManagerTest extends Logging {
       new SimpleRecord(currentTimestamp, s"key-$offset".getBytes, s"value-$offset".getBytes)
     }
 
-    log.appendAsLeader(MemoryRecords.withRecords(CompressionType.NONE, records:_*), leaderEpoch = 1)
+    log.appendAsLeader(MemoryRecords.withRecords(Compression.NONE, records:_*), leaderEpoch = 1)
     log.maybeIncrementHighWatermark(log.logEndOffsetMetadata)
   }
 
@@ -862,8 +868,8 @@ class LogCleanerManagerTest extends Logging {
       time = time,
       brokerTopicStats = new BrokerTopicStats,
       maxTransactionTimeoutMs = 5 * 60 * 1000,
-      maxProducerIdExpirationMs = 60 * 60 * 1000,
-      producerIdExpirationCheckIntervalMs = kafka.server.Defaults.ProducerIdExpirationCheckIntervalMs,
+      producerStateManagerConfig = producerStateManagerConfig,
+      producerIdExpirationCheckIntervalMs = TransactionLogConfigs.PRODUCER_ID_EXPIRATION_CHECK_INTERVAL_MS_DEFAULT,
       logDirFailureChannel = new LogDirFailureChannel(10),
       topicId = None,
       keepPartitionMetadataFile = true
@@ -871,6 +877,6 @@ class LogCleanerManagerTest extends Logging {
   }
 
   private def records(key: Int, value: Int, timestamp: Long) =
-    MemoryRecords.withRecords(CompressionType.NONE, new SimpleRecord(timestamp, key.toString.getBytes, value.toString.getBytes))
+    MemoryRecords.withRecords(Compression.NONE, new SimpleRecord(timestamp, key.toString.getBytes, value.toString.getBytes))
 
 }

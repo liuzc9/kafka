@@ -17,12 +17,10 @@
 package org.apache.kafka.common.security.oauthbearer.internals.unsecured;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
 import java.util.Base64;
 import java.util.Base64.Encoder;
 import java.util.Collections;
@@ -30,7 +28,6 @@ import java.util.HashMap;
 import java.util.Map;
 
 import javax.security.auth.callback.Callback;
-import javax.security.auth.callback.UnsupportedCallbackException;
 
 import org.apache.kafka.common.security.authenticator.TestJaasConfig;
 import org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule;
@@ -79,13 +76,13 @@ public class OAuthBearerUnsecuredValidatorCallbackHandlerTest {
                     + (includeOptionalIssuedAtClaim ? comma(ISSUED_AT_CLAIM_TEXT) : "") + "}";
             Object validationResult = validationResult(UNSECURED_JWT_HEADER_JSON, claimsJson,
                     MODULE_OPTIONS_MAP_NO_SCOPE_REQUIRED);
-            assertTrue(validationResult instanceof OAuthBearerValidatorCallback);
-            assertTrue(((OAuthBearerValidatorCallback) validationResult).token() instanceof OAuthBearerUnsecuredJws);
+            assertInstanceOf(OAuthBearerValidatorCallback.class, validationResult);
+            assertInstanceOf(OAuthBearerUnsecuredJws.class, ((OAuthBearerValidatorCallback) validationResult).token());
         }
     }
 
     @Test
-    public void badOrMissingPrincipal() throws IOException, UnsupportedCallbackException {
+    public void badOrMissingPrincipal() {
         for (boolean exists : new boolean[] {true, false}) {
             String claimsJson = "{" + EXPIRATION_TIME_CLAIM_TEXT + (exists ? comma(BAD_PRINCIPAL_CLAIM_TEXT) : "")
                     + "}";
@@ -94,7 +91,7 @@ public class OAuthBearerUnsecuredValidatorCallbackHandlerTest {
     }
 
     @Test
-    public void tooEarlyExpirationTime() throws IOException, UnsupportedCallbackException {
+    public void tooEarlyExpirationTime() {
         String claimsJson = "{" + PRINCIPAL_CLAIM_TEXT + comma(ISSUED_AT_CLAIM_TEXT)
                 + comma(TOO_EARLY_EXPIRATION_TIME_CLAIM_TEXT) + "}";
         confirmFailsValidation(UNSECURED_JWT_HEADER_JSON, claimsJson, MODULE_OPTIONS_MAP_NO_SCOPE_REQUIRED);
@@ -105,20 +102,19 @@ public class OAuthBearerUnsecuredValidatorCallbackHandlerTest {
         String claimsJson = "{" + SUB_CLAIM_TEXT + comma(EXPIRATION_TIME_CLAIM_TEXT) + comma(SCOPE_CLAIM_TEXT) + "}";
         Object validationResult = validationResult(UNSECURED_JWT_HEADER_JSON, claimsJson,
                 MODULE_OPTIONS_MAP_REQUIRE_EXISTING_SCOPE);
-        assertTrue(validationResult instanceof OAuthBearerValidatorCallback);
-        assertTrue(((OAuthBearerValidatorCallback) validationResult).token() instanceof OAuthBearerUnsecuredJws);
+        assertInstanceOf(OAuthBearerValidatorCallback.class, validationResult);
+        assertInstanceOf(OAuthBearerUnsecuredJws.class, ((OAuthBearerValidatorCallback) validationResult).token());
     }
 
     @Test
-    public void missingRequiredScope() throws IOException, UnsupportedCallbackException {
+    public void missingRequiredScope() {
         String claimsJson = "{" + SUB_CLAIM_TEXT + comma(EXPIRATION_TIME_CLAIM_TEXT) + comma(SCOPE_CLAIM_TEXT) + "}";
         confirmFailsValidation(UNSECURED_JWT_HEADER_JSON, claimsJson, MODULE_OPTIONS_MAP_REQUIRE_ADDITIONAL_SCOPE,
                 "[scope1, scope2]");
     }
 
     private static void confirmFailsValidation(String headerJson, String claimsJson,
-            Map<String, String> moduleOptionsMap) throws OAuthBearerConfigException, OAuthBearerIllegalTokenException,
-            IOException, UnsupportedCallbackException {
+            Map<String, String> moduleOptionsMap) throws OAuthBearerConfigException, OAuthBearerIllegalTokenException {
         confirmFailsValidation(headerJson, claimsJson, moduleOptionsMap, null);
     }
 
@@ -126,7 +122,7 @@ public class OAuthBearerUnsecuredValidatorCallbackHandlerTest {
             Map<String, String> moduleOptionsMap, String optionalFailureScope) throws OAuthBearerConfigException,
             OAuthBearerIllegalTokenException {
         Object validationResultObj = validationResult(headerJson, claimsJson, moduleOptionsMap);
-        assertTrue(validationResultObj instanceof OAuthBearerValidatorCallback);
+        assertInstanceOf(OAuthBearerValidatorCallback.class, validationResultObj);
         OAuthBearerValidatorCallback callback = (OAuthBearerValidatorCallback) validationResultObj;
         assertNull(callback.token());
         assertNull(callback.errorOpenIDConfiguration());
@@ -160,7 +156,7 @@ public class OAuthBearerUnsecuredValidatorCallbackHandlerTest {
                 (Map) options);
         OAuthBearerUnsecuredValidatorCallbackHandler callbackHandler = new OAuthBearerUnsecuredValidatorCallbackHandler();
         callbackHandler.configure(Collections.emptyMap(), OAuthBearerLoginModule.OAUTHBEARER_MECHANISM,
-                Arrays.asList(config.getAppConfigurationEntry("KafkaClient")[0]));
+                Collections.singletonList(config.getAppConfigurationEntry("KafkaClient")[0]));
         return callbackHandler;
     }
 

@@ -54,7 +54,7 @@ public class ConsumerInterceptorsTest {
      * Test consumer interceptor that filters records in onConsume() intercept
      */
     private class FilterConsumerInterceptor<K, V> implements ConsumerInterceptor<K, V> {
-        private int filterPartition;
+        private final int filterPartition;
         private boolean throwExceptionOnConsume = false;
         private boolean throwExceptionOnCommit = false;
 
@@ -78,7 +78,7 @@ public class ConsumerInterceptorsTest {
                 if (tp.partition() != filterPartition)
                     recordMap.put(tp, records.records(tp));
             }
-            return new ConsumerRecords<K, V>(recordMap);
+            return new ConsumerRecords<>(recordMap);
         }
 
         @Override

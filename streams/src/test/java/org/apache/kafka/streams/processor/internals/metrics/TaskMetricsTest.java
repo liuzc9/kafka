@@ -41,7 +41,6 @@ public class TaskMetricsTest {
     private final Sensor expectedSensor = mock(Sensor.class);
     private final Map<String, String> tagMap = Collections.singletonMap("hello", "world");
 
-
     @Test
     public void shouldGetActiveProcessRatioSensor() {
         final String operation = "active-process-ratio";
@@ -117,6 +116,30 @@ public class TaskMetricsTest {
     }
 
     @Test
+    public void shouldGetTotalCacheSizeInBytesSensor() {
+        final String operation = "cache-size-bytes-total";
+        when(streamsMetrics.taskLevelSensor(THREAD_ID, TASK_ID, operation, RecordingLevel.DEBUG))
+                .thenReturn(expectedSensor);
+        final String totalBytesDescription = "The total size in bytes of this task's cache.";
+        when(streamsMetrics.taskLevelTagMap(THREAD_ID, TASK_ID)).thenReturn(tagMap);
+
+        try (final MockedStatic<StreamsMetricsImpl> streamsMetricsStaticMock = mockStatic(StreamsMetricsImpl.class)) {
+            final Sensor sensor = TaskMetrics.totalCacheSizeBytesSensor(THREAD_ID, TASK_ID, streamsMetrics);
+            streamsMetricsStaticMock.verify(
+                    () -> StreamsMetricsImpl.addValueMetricToSensor(
+                            expectedSensor,
+                            TASK_LEVEL_GROUP,
+                            tagMap,
+                            operation,
+                            totalBytesDescription
+                    )
+            );
+            assertThat(sensor, is(expectedSensor));
+        }
+    }
+
+
+    @Test
     public void shouldGetPunctuateSensor() {
         final String operation = "punctuate";
         when(streamsMetrics.taskLevelSensor(THREAD_ID, TASK_ID, operation, RecordingLevel.DEBUG))
@@ -148,30 +171,6 @@ public class TaskMetricsTest {
                     operationLatency,
                     avgLatencyDescription,
                     maxLatencyDescription
-                )
-            );
-            assertThat(sensor, is(expectedSensor));
-        }
-    }
-
-    @Test
-    public void shouldGetCommitSensor() {
-        final String operation = "commit";
-        final String totalDescription = "The total number of calls to commit";
-        final String rateDescription = "The average number of calls to commit per second";
-        when(streamsMetrics.taskLevelSensor(THREAD_ID, TASK_ID, operation, RecordingLevel.DEBUG)).thenReturn(expectedSensor);
-        when(streamsMetrics.taskLevelTagMap(THREAD_ID, TASK_ID)).thenReturn(tagMap);
-
-        try (final MockedStatic<StreamsMetricsImpl> streamsMetricsStaticMock = mockStatic(StreamsMetricsImpl.class)) {
-            final Sensor sensor = TaskMetrics.commitSensor(THREAD_ID, TASK_ID, streamsMetrics);
-            streamsMetricsStaticMock.verify(
-                () -> StreamsMetricsImpl.addInvocationRateAndCountToSensor(
-                    expectedSensor,
-                    TASK_LEVEL_GROUP,
-                    tagMap,
-                    operation,
-                    rateDescription,
-                    totalDescription
                 )
             );
             assertThat(sensor, is(expectedSensor));
@@ -241,12 +240,21 @@ public class TaskMetricsTest {
         try (final MockedStatic<StreamsMetricsImpl> streamsMetricsStaticMock = mockStatic(StreamsMetricsImpl.class)) {
             final Sensor sensor = TaskMetrics.droppedRecordsSensor(THREAD_ID, TASK_ID, streamsMetrics);
             streamsMetricsStaticMock.verify(
-                () -> StreamsMetricsImpl.addInvocationRateAndCountToSensor(
+                () -> StreamsMetricsImpl.addInvocationRateToSensor(
                     expectedSensor,
                     TASK_LEVEL_GROUP,
                     tagMap,
                     operation,
-                    rateDescription,
+                    rateDescription
+                )
+            );
+            streamsMetricsStaticMock.verify(
+                () -> StreamsMetricsImpl.addSumMetricToSensor(
+                    expectedSensor,
+                    TASK_LEVEL_GROUP,
+                    tagMap,
+                    operation,
+                    true,
                     totalDescription
                 )
             );

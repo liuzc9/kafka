@@ -17,23 +17,28 @@
 
 package kafka.server
 
-import kafka.admin.BrokerMetadata
 import kafka.server.metadata.{KRaftMetadataCache, ZkMetadataCache}
+import org.apache.kafka.admin.BrokerMetadata
 import org.apache.kafka.common.message.{MetadataResponseData, UpdateMetadataRequestData}
 import org.apache.kafka.common.network.ListenerName
 import org.apache.kafka.common.{Cluster, Node, TopicPartition, Uuid}
-import org.apache.kafka.server.common.MetadataVersion
+import org.apache.kafka.server.common.{FinalizedFeatures, MetadataVersion}
 
 import java.util
+import scala.collection._
 
-case class FinalizedFeaturesAndEpoch(features: Map[String, Short], epoch: Long) {
-  override def toString(): String = {
-    s"FinalizedFeaturesAndEpoch(features=$features, epoch=$epoch)"
-  }
+/**
+ * Used to represent the controller id cached in the metadata cache of the broker. This trait is
+ * extended to represent if the controller is KRaft controller or Zk controller.
+ */
+sealed trait CachedControllerId {
+  val id: Int
 }
 
-trait MetadataCache {
+case class ZkCachedControllerId(id: Int) extends CachedControllerId
+case class KRaftCachedControllerId(id: Int) extends CachedControllerId
 
+trait MetadataCache {
   /**
    * Return topic metadata for a given set of topics and listener. See KafkaApis#handleTopicMetadataRequest for details
    * on the use of the two boolean flags.
@@ -92,7 +97,7 @@ trait MetadataCache {
 
   def getPartitionReplicaEndpoints(tp: TopicPartition, listenerName: ListenerName): Map[Int, Node]
 
-  def getControllerId: Option[Int]
+  def getControllerId: Option[CachedControllerId]
 
   def getClusterMetadata(clusterId: String, listenerName: ListenerName): Cluster
 
@@ -102,14 +107,18 @@ trait MetadataCache {
 
   def metadataVersion(): MetadataVersion
 
-  def features(): FinalizedFeaturesAndEpoch
+  def getRandomAliveBrokerId: Option[Int]
+
+  def features(): FinalizedFeatures
 }
 
 object MetadataCache {
   def zkMetadataCache(brokerId: Int,
                       metadataVersion: MetadataVersion,
-                      brokerFeatures: BrokerFeatures = BrokerFeatures.createEmpty()): ZkMetadataCache = {
-    new ZkMetadataCache(brokerId, metadataVersion, brokerFeatures)
+                      brokerFeatures: BrokerFeatures = BrokerFeatures.createEmpty(),
+                      zkMigrationEnabled: Boolean = false)
+  : ZkMetadataCache = {
+    new ZkMetadataCache(brokerId, metadataVersion, brokerFeatures, zkMigrationEnabled)
   }
 
   def kRaftMetadataCache(brokerId: Int): KRaftMetadataCache = {

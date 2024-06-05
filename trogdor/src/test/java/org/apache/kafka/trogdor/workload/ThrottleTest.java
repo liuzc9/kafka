@@ -44,7 +44,7 @@ public class ThrottleTest {
         }
 
         @Override
-        protected synchronized void delay(long amount) throws InterruptedException {
+        protected synchronized void delay(long amount) {
             time.sleep(amount);
         }
     }
@@ -69,5 +69,5 @@ public class ThrottleTest {
         assertTrue(throttle.increment());
         assertEquals(200, time.milliseconds());
     }
-};
+}
 

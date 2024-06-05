@@ -17,24 +17,28 @@
 
 package kafka.api
 
+import java.util
 import java.util.{Collections, Properties}
-
 import kafka.integration.KafkaServerTestHarness
 import kafka.server.KafkaConfig
-import kafka.utils.{TestInfoUtils, TestUtils}
+import kafka.utils.TestUtils
 import kafka.utils.TestUtils.{consumeRecords, createAdminClient}
-import org.apache.kafka.clients.admin.{Admin, ProducerState}
-import org.apache.kafka.clients.consumer.KafkaConsumer
+import org.apache.kafka.clients.admin.{Admin, AlterConfigOp, ConfigEntry, ProducerState}
+import org.apache.kafka.clients.consumer.Consumer
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord}
 import org.apache.kafka.common.TopicPartition
+import org.apache.kafka.common.config.ConfigResource
 import org.apache.kafka.common.errors.{InvalidPidMappingException, TransactionalIdNotFoundException}
+import org.apache.kafka.coordinator.group.GroupCoordinatorConfig
+import org.apache.kafka.coordinator.transaction.{TransactionLogConfigs, TransactionStateManagerConfigs}
+import org.apache.kafka.server.config.{ServerConfigs, ReplicationConfigs, ServerLogConfigs}
 import org.apache.kafka.test.{TestUtils => JTestUtils}
-import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.{assertEquals, assertThrows}
 import org.junit.jupiter.api.{AfterEach, BeforeEach, TestInfo}
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.ValueSource
+import org.opentest4j.AssertionFailedError
 
-import scala.jdk.CollectionConverters._
 import scala.collection.Seq
 
 class ProducerIdExpirationTest extends KafkaServerTestHarness {
@@ -42,9 +46,10 @@ class ProducerIdExpirationTest extends KafkaServerTestHarness {
   val numPartitions = 1
   val replicationFactor = 3
   val tp0 = new TopicPartition(topic1, 0)
+  val configResource = new ConfigResource(ConfigResource.Type.BROKER, "")
 
   var producer: KafkaProducer[Array[Byte], Array[Byte]] = _
-  var consumer: KafkaConsumer[Array[Byte], Array[Byte]] = _
+  var consumer: Consumer[Array[Byte], Array[Byte]] = _
   var admin: Admin = _
 
   override def generateConfigs: Seq[KafkaConfig] = {
@@ -74,7 +79,7 @@ class ProducerIdExpirationTest extends KafkaServerTestHarness {
     super.tearDown()
   }
 
-  @ParameterizedTest(name = TestInfoUtils.TestWithParameterizedQuorumName)
+  @ParameterizedTest
   @ValueSource(strings = Array("zk", "kraft"))
   def testProducerIdExpirationWithNoTransactions(quorum: String): Unit = {
     producer = TestUtils.createProducer(bootstrapServers(), enableIdempotence = true)
@@ -98,7 +103,7 @@ class ProducerIdExpirationTest extends KafkaServerTestHarness {
     assertEquals(1, producerState.size)
   }
 
-  @ParameterizedTest(name = TestInfoUtils.TestWithParameterizedQuorumName)
+  @ParameterizedTest
   @ValueSource(strings = Array("zk", "kraft"))
   def testTransactionAfterTransactionIdExpiresButProducerIdRemains(quorum: String): Unit = {
     producer = TestUtils.createTransactionalProducer("transactionalProducer", brokers)
@@ -110,7 +115,7 @@ class ProducerIdExpirationTest extends KafkaServerTestHarness {
     producer.flush()
 
     // Ensure producer IDs are added.
-    assertEquals(1, producerState.size)
+    TestUtils.waitUntilTrue(() => producerState.size == 1, "Producer IDs were not added.")
 
     producer.abortTransaction()
 
@@ -138,7 +143,7 @@ class ProducerIdExpirationTest extends KafkaServerTestHarness {
     producer.commitTransaction()
 
     // Check we can still consume the transaction.
-    consumer.subscribe(List(topic1).asJava)
+    consumer.subscribe(Collections.singletonList(topic1))
 
     val records = consumeRecords(consumer, 2)
     records.foreach { record =>
@@ -146,10 +151,62 @@ class ProducerIdExpirationTest extends KafkaServerTestHarness {
     }
   }
 
-  private def producerState: List[ProducerState] = {
+  @ParameterizedTest
+  @ValueSource(strings = Array("zk", "kraft"))
+  def testDynamicProducerIdExpirationMs(quorum: String): Unit = {
+    producer = TestUtils.createProducer(bootstrapServers(), enableIdempotence = true)
+
+    // Send records to populate producer state cache.
+    producer.send(new ProducerRecord(topic1, 0, null, "key".getBytes, "value".getBytes))
+    producer.flush()
+
+    // Ensure producer IDs are added.
+    ensureConsistentKRaftMetadata()
+    assertEquals(1, producerState.size)
+
+    // Wait for the producer ID to expire.
+    TestUtils.waitUntilTrue(() => producerState.isEmpty, "Producer ID did not expire.")
+
+    // Update the producer ID expiration ms to a very high value.
+    admin.incrementalAlterConfigs(producerIdExpirationConfig("100000"))
+
+    brokers.foreach(broker => TestUtils.waitUntilTrue(() => broker.logManager.producerStateManagerConfig.producerIdExpirationMs == 100000, "Configuration was not updated."))
+
+    // Send more records to send producer ID back to brokers.
+    producer.send(new ProducerRecord(topic1, 0, null, "key".getBytes, "value".getBytes))
+    producer.flush()
+
+    // Producer IDs should repopulate.
+    assertEquals(1, producerState.size)
+
+    // Ensure producer ID does not expire within 4 seconds.
+    assertThrows(classOf[AssertionFailedError], () =>
+      TestUtils.waitUntilTrue(() => producerState.isEmpty, "Producer ID did not expire.", 4000)
+    )
+
+    // Update the expiration time to a low value again.
+    admin.incrementalAlterConfigs(producerIdExpirationConfig("100")).all().get()
+
+    // restart a broker to ensure that dynamic config changes are picked up on restart
+    killBroker(0)
+    restartDeadBrokers()
+
+    brokers.foreach(broker => TestUtils.waitUntilTrue(() => broker.logManager.producerStateManagerConfig.producerIdExpirationMs == 100, "Configuration was not updated."))
+
+    // Ensure producer ID expires quickly again.
+    TestUtils.waitUntilTrue(() => producerState.isEmpty, "Producer ID did not expire.")
+  }
+
+  private def producerState: util.List[ProducerState] = {
     val describeResult = admin.describeProducers(Collections.singletonList(tp0))
     val activeProducers = describeResult.partitionResult(tp0).get().activeProducers
-    activeProducers.asScala.toList
+    activeProducers
+  }
+
+  private def producerIdExpirationConfig(configValue: String): util.Map[ConfigResource, util.Collection[AlterConfigOp]] = {
+    val producerIdCfg = new ConfigEntry(TransactionLogConfigs.PRODUCER_ID_EXPIRATION_MS_CONFIG, configValue)
+    val configs = Collections.singletonList(new AlterConfigOp(producerIdCfg, AlterConfigOp.OpType.SET))
+    Collections.singletonMap(configResource, configs)
   }
 
   private def waitUntilTransactionalStateExpires(): Unit = {
@@ -169,22 +226,22 @@ class ProducerIdExpirationTest extends KafkaServerTestHarness {
 
   private def serverProps(): Properties = {
     val serverProps = new Properties()
-    serverProps.put(KafkaConfig.AutoCreateTopicsEnableProp, false.toString)
+    serverProps.put(ServerLogConfigs.AUTO_CREATE_TOPICS_ENABLE_CONFIG, false.toString)
     // Set a smaller value for the number of partitions for the __consumer_offsets topic
     // so that the creation of that topic/partition(s) and subsequent leader assignment doesn't take relatively long.
-    serverProps.put(KafkaConfig.OffsetsTopicPartitionsProp, 1.toString)
-    serverProps.put(KafkaConfig.TransactionsTopicPartitionsProp, 3.toString)
-    serverProps.put(KafkaConfig.TransactionsTopicReplicationFactorProp, 2.toString)
-    serverProps.put(KafkaConfig.TransactionsTopicMinISRProp, 2.toString)
-    serverProps.put(KafkaConfig.ControlledShutdownEnableProp, true.toString)
-    serverProps.put(KafkaConfig.UncleanLeaderElectionEnableProp, false.toString)
-    serverProps.put(KafkaConfig.AutoLeaderRebalanceEnableProp, false.toString)
-    serverProps.put(KafkaConfig.GroupInitialRebalanceDelayMsProp, "0")
-    serverProps.put(KafkaConfig.TransactionsAbortTimedOutTransactionCleanupIntervalMsProp, "200")
-    serverProps.put(KafkaConfig.TransactionalIdExpirationMsProp, "500")
-    serverProps.put(KafkaConfig.TransactionsRemoveExpiredTransactionalIdCleanupIntervalMsProp, "500")
-    serverProps.put(KafkaConfig.ProducerIdExpirationMsProp, "2000")
-    serverProps.put(KafkaConfig.ProducerIdExpirationCheckIntervalMsProp, "500")
+    serverProps.put(GroupCoordinatorConfig.OFFSETS_TOPIC_PARTITIONS_CONFIG, 1.toString)
+    serverProps.put(TransactionLogConfigs.TRANSACTIONS_TOPIC_PARTITIONS_CONFIG, 3.toString)
+    serverProps.put(TransactionLogConfigs.TRANSACTIONS_TOPIC_REPLICATION_FACTOR_CONFIG, 2.toString)
+    serverProps.put(TransactionLogConfigs.TRANSACTIONS_TOPIC_MIN_ISR_CONFIG, 2.toString)
+    serverProps.put(ServerConfigs.CONTROLLED_SHUTDOWN_ENABLE_CONFIG, true.toString)
+    serverProps.put(ReplicationConfigs.UNCLEAN_LEADER_ELECTION_ENABLE_CONFIG, false.toString)
+    serverProps.put(ReplicationConfigs.AUTO_LEADER_REBALANCE_ENABLE_CONFIG, false.toString)
+    serverProps.put(GroupCoordinatorConfig.GROUP_INITIAL_REBALANCE_DELAY_MS_CONFIG, "0")
+    serverProps.put(TransactionStateManagerConfigs.TRANSACTIONS_ABORT_TIMED_OUT_TRANSACTION_CLEANUP_INTERVAL_MS_CONFIG, "200")
+    serverProps.put(TransactionStateManagerConfigs.TRANSACTIONAL_ID_EXPIRATION_MS_CONFIG, "5000")
+    serverProps.put(TransactionStateManagerConfigs.TRANSACTIONS_REMOVE_EXPIRED_TRANSACTIONAL_ID_CLEANUP_INTERVAL_MS_CONFIG, "500")
+    serverProps.put(TransactionLogConfigs.PRODUCER_ID_EXPIRATION_MS_CONFIG, "10000")
+    serverProps.put(TransactionLogConfigs.PRODUCER_ID_EXPIRATION_CHECK_INTERVAL_MS_CONFIG, "500")
     serverProps
   }
 }

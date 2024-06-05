@@ -31,6 +31,7 @@ import org.apache.kafka.common.Metric;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.InvalidPidMappingException;
 import org.apache.kafka.common.errors.InvalidProducerEpochException;
 import org.apache.kafka.common.errors.ProducerFencedException;
 import org.apache.kafka.common.errors.TimeoutException;
@@ -146,6 +147,10 @@ public class StreamsProducer {
         return StreamsConfigUtils.eosEnabled(processingMode);
     }
 
+    boolean transactionInFlight() {
+        return transactionInFlight;
+    }
+
     /**
      * @throws IllegalStateException if EOS is disabled
      */
@@ -188,12 +193,11 @@ public class StreamsProducer {
 
         oldProducerTotalBlockedTime += totalBlockedTime(producer);
         final long start = time.nanoseconds();
-        producer.close();
+        close();
         final long closeTime = time.nanoseconds() - start;
         oldProducerTotalBlockedTime += closeTime;
 
         producer = clientSupplier.getProducer(eosV2ProducerConfigs);
-        transactionInitialized = false;
     }
 
     private double getMetricValue(final Map<MetricName, ? extends Metric> metrics,
@@ -236,7 +240,7 @@ public class StreamsProducer {
             try {
                 producer.beginTransaction();
                 transactionInFlight = true;
-            } catch (final ProducerFencedException | InvalidProducerEpochException error) {
+            } catch (final ProducerFencedException | InvalidProducerEpochException | InvalidPidMappingException error) {
                 throw new TaskMigratedException(
                     formatException("Producer got fenced trying to begin a new transaction"),
                     error
@@ -275,6 +279,7 @@ public class StreamsProducer {
 
     private static boolean isRecoverable(final KafkaException uncaughtException) {
         return uncaughtException.getCause() instanceof ProducerFencedException ||
+            uncaughtException.getCause() instanceof InvalidPidMappingException ||
             uncaughtException.getCause() instanceof InvalidProducerEpochException ||
             uncaughtException.getCause() instanceof UnknownProducerIdException;
     }
@@ -296,7 +301,7 @@ public class StreamsProducer {
             producer.sendOffsetsToTransaction(offsets, maybeDowngradedGroupMetadata);
             producer.commitTransaction();
             transactionInFlight = false;
-        } catch (final ProducerFencedException | InvalidProducerEpochException | CommitFailedException error) {
+        } catch (final ProducerFencedException | InvalidProducerEpochException | CommitFailedException | InvalidPidMappingException error) {
             throw new TaskMigratedException(
                 formatException("Producer got fenced trying to commit a transaction"),
                 error
@@ -330,7 +335,7 @@ public class StreamsProducer {
                         " Will rely on broker to eventually abort the transaction after the transaction timeout passed.",
                     logAndSwallow
                 );
-            } catch (final ProducerFencedException | InvalidProducerEpochException error) {
+            } catch (final ProducerFencedException | InvalidProducerEpochException | InvalidPidMappingException error) {
                 // The producer is aborting the txn when there's still an ongoing one,
                 // which means that we did not commit the task while closing it, which
                 // means that it is a dirty close. Therefore it is possible that the dirty
@@ -367,6 +372,8 @@ public class StreamsProducer {
 
     void close() {
         producer.close();
+        transactionInFlight = false;
+        transactionInitialized = false;
     }
 
     // for testing only

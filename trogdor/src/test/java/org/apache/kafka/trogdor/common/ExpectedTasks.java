@@ -142,7 +142,7 @@ public class ExpectedTasks {
 
     public ExpectedTasks waitFor(final CoordinatorClient client) throws InterruptedException {
         TestUtils.waitForCondition(() -> {
-            TasksResponse tasks = null;
+            TasksResponse tasks;
             try {
                 tasks = client.tasks(new TasksRequest(null, 0, 0, 0, 0, Optional.empty()));
             } catch (Exception e) {
@@ -172,7 +172,7 @@ public class ExpectedTasks {
 
     public ExpectedTasks waitFor(final AgentClient client) throws InterruptedException {
         TestUtils.waitForCondition(() -> {
-            AgentStatusResponse status = null;
+            AgentStatusResponse status;
             try {
                 status = client.status();
             } catch (Exception e) {
@@ -203,4 +203,4 @@ public class ExpectedTasks {
         }, "Timed out waiting for expected workers " + JsonUtil.toJsonString(expected));
         return this;
     }
-};
+}

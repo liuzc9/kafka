@@ -26,19 +26,18 @@ import org.apache.kafka.common.metrics.Metrics;
 
 public class ConsumerMetrics {
     
-    public FetcherMetricsRegistry fetcherMetrics;
+    public FetchMetricsRegistry fetcherMetrics;
     
     public ConsumerMetrics(Set<String> metricsTags, String metricGrpPrefix) {
-        this.fetcherMetrics = new FetcherMetricsRegistry(metricsTags, metricGrpPrefix);
+        this.fetcherMetrics = new FetchMetricsRegistry(metricsTags, metricGrpPrefix);
     }
 
     public ConsumerMetrics(String metricGroupPrefix) {
-        this(new HashSet<String>(), metricGroupPrefix);
+        this(new HashSet<>(), metricGroupPrefix);
     }
 
     private List<MetricNameTemplate> getAllTemplates() {
-        List<MetricNameTemplate> l = new ArrayList<>(this.fetcherMetrics.getAllTemplates());
-        return l;
+        return new ArrayList<>(this.fetcherMetrics.getAllTemplates());
     }
 
     public static void main(String[] args) {

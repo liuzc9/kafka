@@ -21,7 +21,7 @@ from ducktape.utils.util import wait_until
 
 from kafkatest.directory_layout.kafka_path import KafkaPathResolverMixin
 from kafkatest.services.monitor.jmx import JmxMixin, JmxTool
-from kafkatest.version import DEV_BRANCH, LATEST_0_8_2, LATEST_0_9, LATEST_0_10_0, V_0_10_0_0, V_0_11_0_0, V_2_0_0
+from kafkatest.version import DEV_BRANCH, LATEST_0_8_2, LATEST_0_9, LATEST_0_10_0, V_0_10_0_0, V_0_11_0_0, V_2_0_0, LATEST_3_7
 from kafkatest.services.kafka.util import fix_opts_for_new_jvm
 
 """
@@ -65,7 +65,7 @@ class ConsoleConsumer(KafkaPathResolverMixin, JmxMixin, BackgroundThreadService)
                  enable_systest_events=False, stop_timeout_sec=35, print_timestamp=False, print_partition=False,
                  isolation_level="read_uncommitted", jaas_override_variables=None,
                  kafka_opts_override="", client_prop_file_override="", consumer_properties={},
-                 wait_until_partitions_assigned=False):
+                 wait_until_partitions_assigned=False, log_level="DEBUG"):
         """
         Args:
             context:                    standard context
@@ -113,7 +113,7 @@ class ConsoleConsumer(KafkaPathResolverMixin, JmxMixin, BackgroundThreadService)
         self.client_id = client_id
         self.print_key = print_key
         self.print_partition = print_partition
-        self.log_level = "TRACE"
+        self.log_level = log_level
         self.stop_timeout_sec = stop_timeout_sec
 
         self.isolation_level = isolation_level
@@ -210,7 +210,10 @@ class ConsoleConsumer(KafkaPathResolverMixin, JmxMixin, BackgroundThreadService)
 
         # LoggingMessageFormatter was introduced after 0.9
         if node.version > LATEST_0_9:
-            cmd += " --formatter kafka.tools.LoggingMessageFormatter"
+            if node.version > LATEST_3_7:
+                cmd += " --formatter org.apache.kafka.tools.consumer.LoggingMessageFormatter"
+            else:
+                cmd += " --formatter kafka.tools.LoggingMessageFormatter"
 
         if self.enable_systest_events:
             # enable systest events is only available in 0.10.0 and later

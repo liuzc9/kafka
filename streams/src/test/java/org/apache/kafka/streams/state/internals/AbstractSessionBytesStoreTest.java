@@ -24,6 +24,7 @@ import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.utils.Bytes;
+import org.apache.kafka.common.utils.LogCaptureAppender;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.SystemTime;
 import org.apache.kafka.common.utils.Time;
@@ -34,7 +35,6 @@ import org.apache.kafka.streams.kstream.internals.SessionWindow;
 import org.apache.kafka.streams.processor.StateStoreContext;
 import org.apache.kafka.streams.processor.internals.MockStreamsMetrics;
 import org.apache.kafka.streams.processor.internals.ProcessorRecordContext;
-import org.apache.kafka.streams.processor.internals.testutil.LogCaptureAppender;
 import org.apache.kafka.streams.query.Position;
 import org.apache.kafka.streams.state.KeyValueIterator;
 import org.apache.kafka.streams.state.SessionStore;
@@ -45,6 +45,7 @@ import org.apache.kafka.test.TestUtils;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -58,6 +59,7 @@ import java.util.Properties;
 import static java.util.Arrays.asList;
 import static org.apache.kafka.common.utils.Utils.mkEntry;
 import static org.apache.kafka.common.utils.Utils.mkMap;
+import static org.apache.kafka.common.utils.Utils.mkSet;
 import static org.apache.kafka.common.utils.Utils.toList;
 import static org.apache.kafka.test.StreamsTestUtils.valuesToSet;
 import static org.hamcrest.CoreMatchers.equalTo;
@@ -791,7 +793,7 @@ public abstract class AbstractSessionBytesStoreTest {
     }
 
     @Test
-    public void shouldLogAndMeasureExpiredRecords() {
+    public void shouldMeasureExpiredRecords() {
         final Properties streamsConfig = StreamsTestUtils.getStreamsConfig();
         final SessionStore<String, Long> sessionStore = buildSessionStore(RETENTION_PERIOD, Serdes.String(), Serdes.Long());
         final InternalMockProcessorContext context = new InternalMockProcessorContext(
@@ -804,18 +806,13 @@ public abstract class AbstractSessionBytesStoreTest {
         context.setSystemTimeMs(time.milliseconds());
         sessionStore.init((StateStoreContext) context, sessionStore);
 
-        try (final LogCaptureAppender appender = LogCaptureAppender.createAndRegister()) {
-            // Advance stream time by inserting record with large enough timestamp that records with timestamp 0 are expired
-            // Note that rocksdb will only expire segments at a time (where segment interval = 60,000 for this retention period)
-            sessionStore.put(new Windowed<>("initial record", new SessionWindow(0, 2 * SEGMENT_INTERVAL)), 0L);
+        // Advance stream time by inserting record with large enough timestamp that records with timestamp 0 are expired
+        // Note that rocksdb will only expire segments at a time (where segment interval = 60,000 for this retention period)
+        sessionStore.put(new Windowed<>("initial record", new SessionWindow(0, 2 * SEGMENT_INTERVAL)), 0L);
 
-            // Try inserting a record with timestamp 0 -- should be dropped
-            sessionStore.put(new Windowed<>("late record", new SessionWindow(0, 0)), 0L);
-            sessionStore.put(new Windowed<>("another on-time record", new SessionWindow(0, 2 * SEGMENT_INTERVAL)), 0L);
-
-            final List<String> messages = appender.getMessages();
-            assertThat(messages, hasItem("Skipping record for expired segment."));
-        }
+        // Try inserting a record with timestamp 0 -- should be dropped
+        sessionStore.put(new Windowed<>("late record", new SessionWindow(0, 0)), 0L);
+        sessionStore.put(new Windowed<>("another on-time record", new SessionWindow(0, 2 * SEGMENT_INTERVAL)), 0L);
 
         final Map<MetricName, ? extends Metric> metrics = context.metrics().metrics();
         final String threadId = Thread.currentThread().getName();
@@ -913,7 +910,13 @@ public abstract class AbstractSessionBytesStoreTest {
         try (final KeyValueIterator<Windowed<String>, Long> iterator =
             sessionStore.findSessions("a", "b", 0L, Long.MAX_VALUE)
         ) {
-            assertEquals(valuesToSet(iterator), new HashSet<>(Arrays.asList(2L, 3L, 4L)));
+            if (getStoreType() == StoreType.InMemoryStore) {
+                assertEquals(valuesToSet(iterator), new HashSet<>(Arrays.asList(2L, 3L, 4L)));
+            } else {
+                // The 2 records with values 2L and 3L are considered expired as
+                // their end times < observed stream time - retentionPeriod + 1.
+                Assertions.assertEquals(valuesToSet(iterator), new HashSet<>(Collections.singletonList(4L)));
+            }
         }
     }
 
@@ -933,5 +936,44 @@ public abstract class AbstractSessionBytesStoreTest {
         final Position expected = Position.fromMap(mkMap(mkEntry("", mkMap(mkEntry(0, 3L)))));
         final Position actual = sessionStore.getPosition();
         assertThat(expected, is(actual));
+    }
+
+    @Test
+    public void shouldNotFetchExpiredSessions() {
+        final long systemTime = Time.SYSTEM.milliseconds();
+        sessionStore.put(new Windowed<>("p", new SessionWindow(systemTime - 3 * RETENTION_PERIOD, systemTime - 2 * RETENTION_PERIOD)), 1L);
+        sessionStore.put(new Windowed<>("q", new SessionWindow(systemTime - 2 * RETENTION_PERIOD, systemTime - RETENTION_PERIOD)), 4L);
+        sessionStore.put(new Windowed<>("r", new SessionWindow(systemTime - RETENTION_PERIOD, systemTime - RETENTION_PERIOD / 2)), 3L);
+        sessionStore.put(new Windowed<>("p", new SessionWindow(systemTime - RETENTION_PERIOD, systemTime - RETENTION_PERIOD / 2)), 2L);
+        try (final KeyValueIterator<Windowed<String>, Long> iterator =
+                     sessionStore.findSessions("p", systemTime - 2 * RETENTION_PERIOD, systemTime - RETENTION_PERIOD)
+        ) {
+            Assertions.assertEquals(mkSet(2L), valuesToSet(iterator));
+        }
+        try (final KeyValueIterator<Windowed<String>, Long> iterator =
+                     sessionStore.backwardFindSessions("p", systemTime - 5 * RETENTION_PERIOD, systemTime - 4 * RETENTION_PERIOD)
+        ) {
+            Assertions.assertFalse(iterator.hasNext());
+        }
+        try (final KeyValueIterator<Windowed<String>, Long> iterator =
+                     sessionStore.findSessions("p", "r", systemTime - 5 * RETENTION_PERIOD, systemTime - 4 * RETENTION_PERIOD)
+        ) {
+            Assertions.assertFalse(iterator.hasNext());
+        }
+        try (final KeyValueIterator<Windowed<String>, Long> iterator =
+                     sessionStore.findSessions("p", "r", systemTime - RETENTION_PERIOD, systemTime - RETENTION_PERIOD / 2)
+        ) {
+            Assertions.assertEquals(valuesToSet(iterator), mkSet(2L, 3L, 4L));
+        }
+        try (final KeyValueIterator<Windowed<String>, Long> iterator =
+                     sessionStore.findSessions("p", "r", systemTime - 2 * RETENTION_PERIOD, systemTime - RETENTION_PERIOD)
+        ) {
+            Assertions.assertEquals(valuesToSet(iterator), mkSet(2L, 3L, 4L));
+        }
+        try (final KeyValueIterator<Windowed<String>, Long> iterator =
+                     sessionStore.backwardFindSessions("p", "r", systemTime - 2 * RETENTION_PERIOD, systemTime - RETENTION_PERIOD)
+        ) {
+            Assertions.assertEquals(valuesToSet(iterator), mkSet(2L, 3L, 4L));
+        }
     }
 }

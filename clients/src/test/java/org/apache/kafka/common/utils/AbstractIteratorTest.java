@@ -34,10 +34,10 @@ public class AbstractIteratorTest {
     @Test
     public void testIterator() {
         int max = 10;
-        List<Integer> l = new ArrayList<Integer>();
+        List<Integer> l = new ArrayList<>();
         for (int i = 0; i < max; i++)
             l.add(i);
-        ListIterator<Integer> iter = new ListIterator<Integer>(l);
+        ListIterator<Integer> iter = new ListIterator<>(l);
         for (int i = 0; i < max; i++) {
             Integer value = i;
             assertEquals(value, iter.peek());
@@ -54,14 +54,14 @@ public class AbstractIteratorTest {
     }
 
     static class ListIterator<T> extends AbstractIterator<T> {
-        private List<T> list;
+        private final List<T> list;
         private int position = 0;
 
         public ListIterator(List<T> l) {
             this.list = l;
         }
 
-        public T makeNext() {
+        protected T makeNext() {
             if (position < list.size())
                 return list.get(position++);
             else

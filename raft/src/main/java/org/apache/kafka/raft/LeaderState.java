@@ -17,15 +17,19 @@
 package org.apache.kafka.raft;
 
 import org.apache.kafka.common.message.DescribeQuorumResponseData;
-import org.apache.kafka.common.message.LeaderChangeMessage;
 import org.apache.kafka.common.message.LeaderChangeMessage.Voter;
+import org.apache.kafka.common.message.LeaderChangeMessage;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.ControlRecordUtils;
 import org.apache.kafka.common.utils.LogContext;
+import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.utils.Timer;
 import org.apache.kafka.raft.internals.BatchAccumulator;
+import org.apache.kafka.raft.internals.ReplicaKey;
 import org.slf4j.Logger;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -43,42 +47,101 @@ import java.util.stream.Collectors;
  */
 public class LeaderState<T> implements EpochState {
     static final long OBSERVER_SESSION_TIMEOUT_MS = 300_000L;
+    static final double CHECK_QUORUM_TIMEOUT_FACTOR = 1.5;
 
     private final int localId;
     private final int epoch;
     private final long epochStartOffset;
+    private final Set<Integer> grantingVoters;
 
-    private Optional<LogOffsetMetadata> highWatermark;
+    private Optional<LogOffsetMetadata> highWatermark = Optional.empty();
     private final Map<Integer, ReplicaState> voterStates = new HashMap<>();
     private final Map<Integer, ReplicaState> observerStates = new HashMap<>();
-    private final Set<Integer> grantingVoters = new HashSet<>();
     private final Logger log;
     private final BatchAccumulator<T> accumulator;
+    // The set includes all of the followers voters that FETCH or FETCH_SNAPSHOT during the current checkQuorumTimer interval.
+    private final Set<Integer> fetchedVoters = new HashSet<>();
+    private final Timer checkQuorumTimer;
+    private final int checkQuorumTimeoutMs;
 
     // This is volatile because resignation can be requested from an external thread.
     private volatile boolean resignRequested = false;
 
     protected LeaderState(
+        Time time,
         int localId,
         int epoch,
         long epochStartOffset,
         Set<Integer> voters,
         Set<Integer> grantingVoters,
         BatchAccumulator<T> accumulator,
+        int fetchTimeoutMs,
         LogContext logContext
     ) {
         this.localId = localId;
         this.epoch = epoch;
         this.epochStartOffset = epochStartOffset;
-        this.highWatermark = Optional.empty();
 
         for (int voterId : voters) {
             boolean hasAcknowledgedLeader = voterId == localId;
             this.voterStates.put(voterId, new ReplicaState(voterId, hasAcknowledgedLeader));
         }
-        this.grantingVoters.addAll(grantingVoters);
+        this.grantingVoters = Collections.unmodifiableSet(new HashSet<>(grantingVoters));
         this.log = logContext.logger(LeaderState.class);
         this.accumulator = Objects.requireNonNull(accumulator, "accumulator must be non-null");
+        // use the 1.5x of fetch timeout to tolerate some network transition time or other IO time.
+        this.checkQuorumTimeoutMs = (int) (fetchTimeoutMs * CHECK_QUORUM_TIMEOUT_FACTOR);
+        this.checkQuorumTimer = time.timer(checkQuorumTimeoutMs);
+    }
+
+    /**
+     * Get the remaining time in milliseconds until the checkQuorumTimer expires.
+     * This will happen if we didn't receive a valid fetch/fetchSnapshot request from the majority of the voters within checkQuorumTimeoutMs.
+     *
+     * @param currentTimeMs the current timestamp in millisecond
+     * @return the remainingMs before the checkQuorumTimer expired
+     */
+    public long timeUntilCheckQuorumExpires(long currentTimeMs) {
+        // if there's only 1 voter, it should never get expired.
+        if (voterStates.size() == 1) {
+            return Long.MAX_VALUE;
+        }
+        checkQuorumTimer.update(currentTimeMs);
+        long remainingMs = checkQuorumTimer.remainingMs();
+        if (remainingMs == 0) {
+            log.info(
+                "Did not receive fetch request from the majority of the voters within {}ms. Current fetched voters are {}.",
+                checkQuorumTimeoutMs,
+                fetchedVoters);
+        }
+        return remainingMs;
+    }
+
+    /**
+     * Reset the checkQuorumTimer if we've received fetch/fetchSnapshot request from the majority of the voter
+     *
+     * @param id the node id
+     * @param currentTimeMs the current timestamp in millisecond
+     */
+    public void updateCheckQuorumForFollowingVoter(int id, long currentTimeMs) {
+        updateFetchedVoters(id);
+        // The majority number of the voters excluding the leader. Ex: 3 voters, the value will be 1
+        int majority = voterStates.size() / 2;
+        if (fetchedVoters.size() >= majority) {
+            fetchedVoters.clear();
+            checkQuorumTimer.update(currentTimeMs);
+            checkQuorumTimer.reset(checkQuorumTimeoutMs);
+        }
+    }
+
+    private void updateFetchedVoters(int id) {
+        if (id == localId) {
+            throw new IllegalArgumentException("Received a FETCH/FETCH_SNAPSHOT request from the leader itself.");
+        }
+
+        if (isVoter(id)) {
+            fetchedVoters.add(id);
+        }
     }
 
     public BatchAccumulator<T> accumulator() {
@@ -100,7 +163,7 @@ public class LeaderState<T> implements EpochState {
             .setLeaderId(this.election().leaderId())
             .setVoters(voters)
             .setGrantingVoters(grantingVoters);
-        
+
         accumulator.appendLeaderChangeMessage(leaderChangeMessage, currentTimeMs);
         accumulator.forceDrain();
     }
@@ -170,8 +233,10 @@ public class LeaderState<T> implements EpochState {
                     if (highWatermarkUpdateOffset > currentHighWatermarkMetadata.offset
                         || (highWatermarkUpdateOffset == currentHighWatermarkMetadata.offset &&
                             !highWatermarkUpdateMetadata.metadata.equals(currentHighWatermarkMetadata.metadata))) {
+                        Optional<LogOffsetMetadata> oldHighWatermark = highWatermark;
                         highWatermark = highWatermarkUpdateOpt;
                         logHighWatermarkUpdate(
+                            oldHighWatermark,
                             highWatermarkUpdateMetadata,
                             indexOfHw,
                             followersByDescendingFetchOffset
@@ -187,8 +252,10 @@ public class LeaderState<T> implements EpochState {
                         return false;
                     }
                 } else {
+                    Optional<LogOffsetMetadata> oldHighWatermark = highWatermark;
                     highWatermark = highWatermarkUpdateOpt;
                     logHighWatermarkUpdate(
+                        oldHighWatermark,
                         highWatermarkUpdateMetadata,
                         indexOfHw,
                         followersByDescendingFetchOffset
@@ -201,16 +268,28 @@ public class LeaderState<T> implements EpochState {
     }
 
     private void logHighWatermarkUpdate(
+        Optional<LogOffsetMetadata> oldHighWatermark,
         LogOffsetMetadata newHighWatermark,
         int indexOfHw,
         List<ReplicaState> followersByDescendingFetchOffset
     ) {
-        log.trace(
-            "High watermark set to {} based on indexOfHw {} and voters {}",
-            newHighWatermark,
-            indexOfHw,
-            followersByDescendingFetchOffset
-        );
+        if (oldHighWatermark.isPresent()) {
+            log.debug(
+                "High watermark set to {} from {} based on indexOfHw {} and voters {}",
+                newHighWatermark,
+                oldHighWatermark.get(),
+                indexOfHw,
+                followersByDescendingFetchOffset
+            );
+        } else {
+            log.info(
+                "High watermark set to {} for the first time for epoch {} based on indexOfHw {} and voters {}",
+                newHighWatermark,
+                epoch,
+                indexOfHw,
+                followersByDescendingFetchOffset
+            );
+        }
     }
 
     /**
@@ -271,6 +350,7 @@ public class LeaderState<T> implements EpochState {
             fetchOffsetMetadata,
             leaderEndOffsetOpt
         );
+        updateCheckQuorumForFollowingVoter(replicaId, currentTimeMs);
 
         return isVoter(state.nodeId) && maybeUpdateHighWatermark();
     }
@@ -320,7 +400,7 @@ public class LeaderState<T> implements EpochState {
             .setErrorCode(Errors.NONE.code())
             .setLeaderId(localId)
             .setLeaderEpoch(epoch)
-            .setHighWatermark(highWatermark().map(offsetMetadata -> offsetMetadata.offset).orElse(-1L))
+            .setHighWatermark(highWatermark.map(offsetMetadata -> offsetMetadata.offset).orElse(-1L))
             .setCurrentVoters(describeReplicaStates(voterStates, currentTimeMs))
             .setObservers(describeReplicaStates(observerStates, currentTimeMs));
     }
@@ -434,15 +514,18 @@ public class LeaderState<T> implements EpochState {
                 endOffset,
                 lastFetchTimestamp,
                 lastCaughtUpTimestamp,
-                hasAcknowledgedLeader 
+                hasAcknowledgedLeader
             );
         }
     }
 
     @Override
-    public boolean canGrantVote(int candidateId, boolean isLogUpToDate) {
-        log.debug("Rejecting vote request from candidate {} since we are already leader in epoch {}",
-            candidateId, epoch);
+    public boolean canGrantVote(ReplicaKey candidateKey, boolean isLogUpToDate) {
+        log.debug(
+            "Rejecting vote request from candidate ({}) since we are already leader in epoch {}",
+            candidateKey,
+            epoch
+        );
         return false;
     }
 

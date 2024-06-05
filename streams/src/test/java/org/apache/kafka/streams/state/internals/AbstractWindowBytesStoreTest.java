@@ -34,7 +34,7 @@ import org.apache.kafka.streams.kstream.Windowed;
 import org.apache.kafka.streams.processor.StateStoreContext;
 import org.apache.kafka.streams.processor.internals.MockStreamsMetrics;
 import org.apache.kafka.streams.processor.internals.ProcessorRecordContext;
-import org.apache.kafka.streams.processor.internals.testutil.LogCaptureAppender;
+import org.apache.kafka.common.utils.LogCaptureAppender;
 import org.apache.kafka.streams.state.KeyValueIterator;
 import org.apache.kafka.streams.state.StateSerdes;
 import org.apache.kafka.streams.state.WindowStore;
@@ -342,7 +342,7 @@ public abstract class AbstractWindowBytesStoreTest {
         );
         assertEquals(
             asList(zero, one, two, three),
-            toList(windowStore.fetchAll(ofEpochMilli(defaultStartTime + 0), ofEpochMilli(defaultStartTime + 3)))
+            toList(windowStore.fetchAll(ofEpochMilli(defaultStartTime), ofEpochMilli(defaultStartTime + 3)))
         );
         assertEquals(
             asList(one, two, three, four, five),
@@ -360,7 +360,7 @@ public abstract class AbstractWindowBytesStoreTest {
         );
         assertEquals(
             asList(three, two, one, zero),
-            toList(windowStore.backwardFetchAll(ofEpochMilli(defaultStartTime + 0), ofEpochMilli(defaultStartTime + 3)))
+            toList(windowStore.backwardFetchAll(ofEpochMilli(defaultStartTime), ofEpochMilli(defaultStartTime + 3)))
         );
         assertEquals(
             asList(five, four, three, two, one),
@@ -984,7 +984,7 @@ public abstract class AbstractWindowBytesStoreTest {
     }
 
     @Test
-    public void shouldLogAndMeasureExpiredRecords() {
+    public void shouldMeasureExpiredRecords() {
         final Properties streamsConfig = StreamsTestUtils.getStreamsConfig();
         final WindowStore<Integer, String> windowStore =
             buildWindowStore(RETENTION_PERIOD, WINDOW_SIZE, false, Serdes.Integer(), Serdes.String());
@@ -998,17 +998,12 @@ public abstract class AbstractWindowBytesStoreTest {
         context.setTime(1L);
         windowStore.init((StateStoreContext) context, windowStore);
 
-        try (final LogCaptureAppender appender = LogCaptureAppender.createAndRegister()) {
-            // Advance stream time by inserting record with large enough timestamp that records with timestamp 0 are expired
-            windowStore.put(1, "initial record", 2 * RETENTION_PERIOD);
+        // Advance stream time by inserting record with large enough timestamp that records with timestamp 0 are expired
+        windowStore.put(1, "initial record", 2 * RETENTION_PERIOD);
 
-            // Try inserting a record with timestamp 0 -- should be dropped
-            windowStore.put(1, "late record", 0L);
-            windowStore.put(1, "another on-time record", RETENTION_PERIOD + 1);
-
-            final List<String> messages = appender.getMessages();
-            assertThat(messages, hasItem("Skipping record for expired segment."));
-        }
+        // Try inserting a record with timestamp 0 -- should be dropped
+        windowStore.put(1, "late record", 0L);
+        windowStore.put(1, "another on-time record", RETENTION_PERIOD + 1);
 
         final Map<MetricName, ? extends Metric> metrics = context.metrics().metrics();
 

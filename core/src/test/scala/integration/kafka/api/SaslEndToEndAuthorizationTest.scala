@@ -19,10 +19,11 @@ package kafka.api
 import org.apache.kafka.common.config.SaslConfigs
 import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.errors.{GroupAuthorizationException, TopicAuthorizationException}
-import org.junit.jupiter.api.{BeforeEach, Test, TestInfo, Timeout}
+import org.junit.jupiter.api.{BeforeEach, TestInfo, Timeout}
 import org.junit.jupiter.api.Assertions.{assertEquals, assertTrue, fail}
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 
-import scala.collection.immutable.List
 import scala.jdk.CollectionConverters._
 
 abstract class SaslEndToEndAuthorizationTest extends EndToEndAuthorizationTest {
@@ -43,6 +44,9 @@ abstract class SaslEndToEndAuthorizationTest extends EndToEndAuthorizationTest {
     producerConfig.put(SaslConfigs.SASL_JAAS_CONFIG, clientLoginContext)
     consumerConfig.put(SaslConfigs.SASL_JAAS_CONFIG, clientLoginContext)
     adminClientConfig.put(SaslConfigs.SASL_JAAS_CONFIG, clientLoginContext)
+
+    val superuserLoginContext = jaasAdminLoginModule(kafkaClientSaslMechanism)
+    superuserClientConfig.put(SaslConfigs.SASL_JAAS_CONFIG, superuserLoginContext)
     super.setUp(testInfo)
   }
 
@@ -52,8 +56,9 @@ abstract class SaslEndToEndAuthorizationTest extends EndToEndAuthorizationTest {
     * the second one connects ok, but fails to consume messages due to the ACL.
     */
   @Timeout(15)
-  @Test
-  def testTwoConsumersWithDifferentSaslCredentials(): Unit = {
+  @ParameterizedTest
+  @ValueSource(strings = Array("kraft", "zk"))
+  def testTwoConsumersWithDifferentSaslCredentials(quorum: String): Unit = {
     setAclsAndProduce(tp)
     val consumer1 = createConsumer()
 
@@ -77,5 +82,6 @@ abstract class SaslEndToEndAuthorizationTest extends EndToEndAuthorizationTest {
       case e: GroupAuthorizationException => assertEquals(group, e.groupId)
     }
     confirmReauthenticationMetrics()
+
   }
 }
