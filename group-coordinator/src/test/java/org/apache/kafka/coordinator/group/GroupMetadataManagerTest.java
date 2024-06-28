@@ -33,9 +33,9 @@ import org.apache.kafka.common.errors.RebalanceInProgressException;
 import org.apache.kafka.common.errors.UnknownMemberIdException;
 import org.apache.kafka.common.errors.UnknownServerException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
+import org.apache.kafka.common.errors.UnreleasedInstanceIdException;
 import org.apache.kafka.common.errors.UnsupportedAssignorException;
 import org.apache.kafka.common.message.ConsumerGroupDescribeResponseData;
-import org.apache.kafka.common.errors.UnreleasedInstanceIdException;
 import org.apache.kafka.common.message.ConsumerGroupHeartbeatRequestData;
 import org.apache.kafka.common.message.ConsumerGroupHeartbeatResponseData;
 import org.apache.kafka.common.message.ConsumerProtocolAssignment;
@@ -61,27 +61,29 @@ import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.coordinator.group.MockCoordinatorTimer.ExpiredTimeout;
 import org.apache.kafka.coordinator.group.MockCoordinatorTimer.ScheduledTimeout;
-import org.apache.kafka.coordinator.group.assignor.ConsumerGroupPartitionAssignor;
-import org.apache.kafka.coordinator.group.assignor.GroupAssignment;
-import org.apache.kafka.coordinator.group.assignor.MemberAssignment;
-import org.apache.kafka.coordinator.group.assignor.PartitionAssignorException;
+import org.apache.kafka.coordinator.group.api.assignor.ConsumerGroupPartitionAssignor;
+import org.apache.kafka.coordinator.group.api.assignor.GroupAssignment;
+import org.apache.kafka.coordinator.group.api.assignor.MemberAssignment;
+import org.apache.kafka.coordinator.group.api.assignor.PartitionAssignorException;
+import org.apache.kafka.coordinator.group.classic.ClassicGroup;
+import org.apache.kafka.coordinator.group.classic.ClassicGroupMember;
 import org.apache.kafka.coordinator.group.classic.ClassicGroupState;
 import org.apache.kafka.coordinator.group.consumer.Assignment;
 import org.apache.kafka.coordinator.group.consumer.ConsumerGroup;
 import org.apache.kafka.coordinator.group.consumer.ConsumerGroupBuilder;
 import org.apache.kafka.coordinator.group.consumer.ConsumerGroupMember;
-import org.apache.kafka.coordinator.group.consumer.MemberState;
+import org.apache.kafka.coordinator.group.consumer.MemberAssignmentImpl;
 import org.apache.kafka.coordinator.group.consumer.TopicMetadata;
 import org.apache.kafka.coordinator.group.generated.ConsumerGroupMemberMetadataValue;
 import org.apache.kafka.coordinator.group.generated.GroupMetadataValue;
-import org.apache.kafka.coordinator.group.classic.ClassicGroup;
-import org.apache.kafka.coordinator.group.classic.ClassicGroupMember;
 import org.apache.kafka.coordinator.group.metrics.GroupCoordinatorMetricsShard;
+import org.apache.kafka.coordinator.group.modern.MemberState;
 import org.apache.kafka.coordinator.group.runtime.CoordinatorResult;
 import org.apache.kafka.image.MetadataDelta;
 import org.apache.kafka.image.MetadataImage;
 import org.apache.kafka.image.MetadataProvenance;
 import org.apache.kafka.server.common.MetadataVersion;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -101,11 +103,11 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
-import static org.apache.kafka.common.protocol.Errors.NOT_COORDINATOR;
-import static org.apache.kafka.common.requests.ConsumerGroupHeartbeatRequest.LEAVE_GROUP_STATIC_MEMBER_EPOCH;
 import static org.apache.kafka.common.message.JoinGroupRequestData.JoinGroupRequestProtocol;
 import static org.apache.kafka.common.message.JoinGroupRequestData.JoinGroupRequestProtocolCollection;
+import static org.apache.kafka.common.protocol.Errors.NOT_COORDINATOR;
 import static org.apache.kafka.common.requests.ConsumerGroupHeartbeatRequest.LEAVE_GROUP_MEMBER_EPOCH;
+import static org.apache.kafka.common.requests.ConsumerGroupHeartbeatRequest.LEAVE_GROUP_STATIC_MEMBER_EPOCH;
 import static org.apache.kafka.common.requests.JoinGroupRequest.UNKNOWN_MEMBER_ID;
 import static org.apache.kafka.common.utils.Utils.mkSet;
 import static org.apache.kafka.coordinator.group.Assertions.assertRecordEquals;
@@ -114,15 +116,15 @@ import static org.apache.kafka.coordinator.group.Assertions.assertResponseEquals
 import static org.apache.kafka.coordinator.group.Assertions.assertUnorderedListEquals;
 import static org.apache.kafka.coordinator.group.AssignmentTestUtil.mkAssignment;
 import static org.apache.kafka.coordinator.group.AssignmentTestUtil.mkTopicAssignment;
+import static org.apache.kafka.coordinator.group.CoordinatorRecordHelpersTest.mkMapOfPartitionRacks;
+import static org.apache.kafka.coordinator.group.GroupMetadataManager.EMPTY_RESULT;
 import static org.apache.kafka.coordinator.group.GroupMetadataManager.appendGroupMetadataErrorToResponseError;
+import static org.apache.kafka.coordinator.group.GroupMetadataManager.classicGroupHeartbeatKey;
 import static org.apache.kafka.coordinator.group.GroupMetadataManager.classicGroupJoinKey;
+import static org.apache.kafka.coordinator.group.GroupMetadataManager.classicGroupSyncKey;
 import static org.apache.kafka.coordinator.group.GroupMetadataManager.consumerGroupJoinKey;
 import static org.apache.kafka.coordinator.group.GroupMetadataManager.consumerGroupRebalanceTimeoutKey;
 import static org.apache.kafka.coordinator.group.GroupMetadataManager.consumerGroupSessionTimeoutKey;
-import static org.apache.kafka.coordinator.group.GroupMetadataManager.EMPTY_RESULT;
-import static org.apache.kafka.coordinator.group.GroupMetadataManager.classicGroupHeartbeatKey;
-import static org.apache.kafka.coordinator.group.GroupMetadataManager.classicGroupSyncKey;
-import static org.apache.kafka.coordinator.group.CoordinatorRecordHelpersTest.mkMapOfPartitionRacks;
 import static org.apache.kafka.coordinator.group.classic.ClassicGroupMember.EMPTY_ASSIGNMENT;
 import static org.apache.kafka.coordinator.group.classic.ClassicGroupState.COMPLETING_REBALANCE;
 import static org.apache.kafka.coordinator.group.classic.ClassicGroupState.DEAD;
@@ -435,7 +437,7 @@ public class GroupMetadataManagerTest {
             .build();
 
         assignor.prepareGroupAssignment(new GroupAssignment(
-            Collections.singletonMap(memberId, new MemberAssignment(mkAssignment(
+            Collections.singletonMap(memberId, new MemberAssignmentImpl(mkAssignment(
                 mkTopicAssignment(fooTopicId, 0, 1, 2, 3, 4, 5),
                 mkTopicAssignment(barTopicId, 0, 1, 2)
             )))
@@ -540,7 +542,7 @@ public class GroupMetadataManagerTest {
             .build();
 
         assignor.prepareGroupAssignment(new GroupAssignment(
-            Collections.singletonMap(memberId, new MemberAssignment(mkAssignment(
+            Collections.singletonMap(memberId, new MemberAssignmentImpl(mkAssignment(
                 mkTopicAssignment(fooTopicId, 0, 1, 2, 3, 4, 5),
                 mkTopicAssignment(barTopicId, 0, 1, 2)
             )))
@@ -663,15 +665,15 @@ public class GroupMetadataManagerTest {
         assignor.prepareGroupAssignment(new GroupAssignment(
             new HashMap<String, MemberAssignment>() {
                 {
-                    put(memberId1, new MemberAssignment(mkAssignment(
+                    put(memberId1, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 0, 1),
                         mkTopicAssignment(barTopicId, 0)
                     )));
-                    put(memberId2, new MemberAssignment(mkAssignment(
+                    put(memberId2, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 2, 3),
                         mkTopicAssignment(barTopicId, 1)
                     )));
-                    put(memberId3, new MemberAssignment(mkAssignment(
+                    put(memberId3, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 4, 5),
                         mkTopicAssignment(barTopicId, 2)
                     )));
@@ -897,15 +899,15 @@ public class GroupMetadataManagerTest {
         assignor.prepareGroupAssignment(new GroupAssignment(
             new HashMap<String, MemberAssignment>() {
                 {
-                    put(memberId1, new MemberAssignment(mkAssignment(
+                    put(memberId1, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 0, 1),
                         mkTopicAssignment(barTopicId, 0)
                     )));
-                    put(memberId2, new MemberAssignment(mkAssignment(
+                    put(memberId2, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 2, 3),
                         mkTopicAssignment(barTopicId, 1)
                     )));
-                    put(memberId3, new MemberAssignment(mkAssignment(
+                    put(memberId3, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 4, 5),
                         mkTopicAssignment(barTopicId, 2)
                     )));
@@ -1047,12 +1049,12 @@ public class GroupMetadataManagerTest {
         assignor.prepareGroupAssignment(new GroupAssignment(
             new HashMap<String, MemberAssignment>() {
                 {
-                    put(memberId1, new MemberAssignment(mkAssignment(
+                    put(memberId1, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 0, 1, 2),
                         mkTopicAssignment(barTopicId, 0, 1)
                     )));
                     // When the member rejoins, it gets the same assignments.
-                    put(member2RejoinId, new MemberAssignment(mkAssignment(
+                    put(member2RejoinId, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 3, 4, 5),
                         mkTopicAssignment(barTopicId, 2)
                     )));
@@ -1680,7 +1682,7 @@ public class GroupMetadataManagerTest {
         assignor.prepareGroupAssignment(new GroupAssignment(
             new HashMap<String, MemberAssignment>() {
                 {
-                    put(memberId, new MemberAssignment(mkAssignment(
+                    put(memberId, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 0, 1)
                     )));
                 }
@@ -1816,15 +1818,15 @@ public class GroupMetadataManagerTest {
         assignor.prepareGroupAssignment(new GroupAssignment(
             new HashMap<String, MemberAssignment>() {
                 {
-                    put(memberId1, new MemberAssignment(mkAssignment(
+                    put(memberId1, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 0, 1),
                         mkTopicAssignment(barTopicId, 0)
                     )));
-                    put(memberId2, new MemberAssignment(mkAssignment(
+                    put(memberId2, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 2, 3),
                         mkTopicAssignment(barTopicId, 2)
                     )));
-                    put(memberId3, new MemberAssignment(mkAssignment(
+                    put(memberId3, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 4, 5),
                         mkTopicAssignment(barTopicId, 1)
                     )));
@@ -2395,7 +2397,7 @@ public class GroupMetadataManagerTest {
 
         // Prepare the assignment result.
         assignor.prepareGroupAssignment(new GroupAssignment(
-            Collections.singletonMap(memberId, new MemberAssignment(mkAssignment(
+            Collections.singletonMap(memberId, new MemberAssignmentImpl(mkAssignment(
                 mkTopicAssignment(fooTopicId, 0, 1, 2, 3, 4, 5)
             )))
         ));
@@ -2506,7 +2508,7 @@ public class GroupMetadataManagerTest {
 
         // Prepare the assignment result.
         assignor.prepareGroupAssignment(new GroupAssignment(
-            Collections.singletonMap(memberId, new MemberAssignment(mkAssignment(
+            Collections.singletonMap(memberId, new MemberAssignmentImpl(mkAssignment(
                 mkTopicAssignment(fooTopicId, 0, 1, 2, 3, 4, 5)
             )))
         ));
@@ -2808,7 +2810,7 @@ public class GroupMetadataManagerTest {
             .build();
 
         assignor.prepareGroupAssignment(new GroupAssignment(
-            Collections.singletonMap(memberId, new MemberAssignment(mkAssignment(
+            Collections.singletonMap(memberId, new MemberAssignmentImpl(mkAssignment(
                 mkTopicAssignment(fooTopicId, 0, 1, 2, 3, 4, 5)
             )))
         ));
@@ -2883,7 +2885,7 @@ public class GroupMetadataManagerTest {
             .build();
 
         assignor.prepareGroupAssignment(new GroupAssignment(
-            Collections.singletonMap(memberId, new MemberAssignment(mkAssignment(
+            Collections.singletonMap(memberId, new MemberAssignmentImpl(mkAssignment(
                 mkTopicAssignment(fooTopicId, 0, 1, 2, 3, 4, 5)
             )))
         ));
@@ -2947,7 +2949,7 @@ public class GroupMetadataManagerTest {
             .build();
 
         assignor.prepareGroupAssignment(new GroupAssignment(
-            Collections.singletonMap(memberId, new MemberAssignment(mkAssignment(
+            Collections.singletonMap(memberId, new MemberAssignmentImpl(mkAssignment(
                 mkTopicAssignment(fooTopicId, 0, 1, 2, 3, 4, 5)
             )))
         ));
@@ -3031,7 +3033,7 @@ public class GroupMetadataManagerTest {
         assignor.prepareGroupAssignment(new GroupAssignment(
             new HashMap<String, MemberAssignment>() {
                 {
-                    put(memberId1, new MemberAssignment(mkAssignment(
+                    put(memberId1, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 0, 1, 2)
                     )));
                 }
@@ -3071,10 +3073,10 @@ public class GroupMetadataManagerTest {
         assignor.prepareGroupAssignment(new GroupAssignment(
             new HashMap<String, MemberAssignment>() {
                 {
-                    put(memberId1, new MemberAssignment(mkAssignment(
+                    put(memberId1, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 0, 1)
                     )));
-                    put(memberId2, new MemberAssignment(mkAssignment(
+                    put(memberId2, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 2)
                     )));
                 }
@@ -3186,7 +3188,7 @@ public class GroupMetadataManagerTest {
         assignor.prepareGroupAssignment(new GroupAssignment(
             new HashMap<String, MemberAssignment>() {
                 {
-                    put(memberId1, new MemberAssignment(mkAssignment(
+                    put(memberId1, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 0, 1, 2)
                     )));
                 }
@@ -3226,10 +3228,10 @@ public class GroupMetadataManagerTest {
         assignor.prepareGroupAssignment(new GroupAssignment(
             new HashMap<String, MemberAssignment>() {
                 {
-                    put(memberId1, new MemberAssignment(mkAssignment(
+                    put(memberId1, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 0, 1)
                     )));
-                    put(memberId2, new MemberAssignment(mkAssignment(
+                    put(memberId2, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 2)
                     )));
                 }
@@ -3520,7 +3522,7 @@ public class GroupMetadataManagerTest {
         ClassicGroup group = context.groupMetadataManager.getOrMaybeCreateClassicGroup("group-id", false);
 
         assertTrue(group.isInState(PREPARING_REBALANCE));
-        assertEquals(2, group.size());
+        assertEquals(2, group.numMembers());
     }
 
     @Test
@@ -3619,7 +3621,7 @@ public class GroupMetadataManagerTest {
 
         List<String> memberIds = verifyClassicGroupJoinResponses(firstRoundJoinResults, 0, Errors.MEMBER_ID_REQUIRED);
         assertEquals(groupMaxSize + 1, memberIds.size());
-        assertEquals(0, group.size());
+        assertEquals(0, group.numMembers());
         assertTrue(group.isInState(EMPTY));
         assertEquals(groupMaxSize + 1, group.numPendingJoinMembers());
 
@@ -3639,7 +3641,7 @@ public class GroupMetadataManagerTest {
         GroupMetadataManagerTestContext.assertNoOrEmptyResult(context.sleep(50));
 
         verifyClassicGroupJoinResponses(secondRoundJoinResults, groupMaxSize, Errors.GROUP_MAX_SIZE_REACHED);
-        assertEquals(groupMaxSize, group.size());
+        assertEquals(groupMaxSize, group.numMembers());
         assertEquals(0, group.numPendingJoinMembers());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
 
@@ -3675,7 +3677,7 @@ public class GroupMetadataManagerTest {
             requiredKnownMemberId
         )).collect(Collectors.toList());
 
-        assertEquals(groupMaxSize, group.size());
+        assertEquals(groupMaxSize, group.numMembers());
         assertEquals(groupMaxSize, group.numAwaitingJoinResponse());
         assertTrue(group.isInState(PREPARING_REBALANCE));
 
@@ -3696,7 +3698,7 @@ public class GroupMetadataManagerTest {
         )).collect(Collectors.toList());
 
         verifyClassicGroupJoinResponses(secondRoundJoinResults, 10, Errors.GROUP_MAX_SIZE_REACHED);
-        assertEquals(groupMaxSize, group.size());
+        assertEquals(groupMaxSize, group.numMembers());
         assertEquals(0, group.numAwaitingJoinResponse());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
     }
@@ -3727,7 +3729,7 @@ public class GroupMetadataManagerTest {
                                                                                                  .map(instanceId -> context.sendClassicGroupJoin(request.setGroupInstanceId(instanceId)))
                                                                                                  .collect(Collectors.toList());
 
-        assertEquals(groupMaxSize, group.size());
+        assertEquals(groupMaxSize, group.numMembers());
         assertEquals(groupMaxSize, group.numAwaitingJoinResponse());
         assertTrue(group.isInState(PREPARING_REBALANCE));
 
@@ -3750,7 +3752,7 @@ public class GroupMetadataManagerTest {
         )).collect(Collectors.toList());
 
         verifyClassicGroupJoinResponses(secondRoundJoinResults, groupMaxSize, Errors.GROUP_MAX_SIZE_REACHED);
-        assertEquals(groupMaxSize, group.size());
+        assertEquals(groupMaxSize, group.numMembers());
         assertEquals(0, group.numAwaitingJoinResponse());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
     }
@@ -3777,7 +3779,7 @@ public class GroupMetadataManagerTest {
                                                                                            .mapToObj(__ -> context.sendClassicGroupJoin(request, requiredKnownMemberId))
                                                                                            .collect(Collectors.toList());
 
-        assertEquals(0, group.size());
+        assertEquals(0, group.numMembers());
         assertEquals(groupMaxSize + 1, group.numPendingJoinMembers());
         assertTrue(group.isInState(EMPTY));
 
@@ -3794,7 +3796,7 @@ public class GroupMetadataManagerTest {
             assertTrue(joinResult.records.isEmpty());
         });
 
-        assertEquals(groupMaxSize, group.size());
+        assertEquals(groupMaxSize, group.numMembers());
         assertEquals(groupMaxSize, group.numAwaitingJoinResponse());
         assertTrue(group.isInState(PREPARING_REBALANCE));
 
@@ -3813,7 +3815,7 @@ public class GroupMetadataManagerTest {
         GroupMetadataManagerTestContext.assertNoOrEmptyResult(context.sleep(50));
 
         verifyClassicGroupJoinResponses(thirdRoundJoinResults, groupMaxSize, Errors.GROUP_MAX_SIZE_REACHED);
-        assertEquals(groupMaxSize, group.size());
+        assertEquals(groupMaxSize, group.numMembers());
         assertEquals(0, group.numAwaitingJoinResponse());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
     }
@@ -3858,7 +3860,7 @@ public class GroupMetadataManagerTest {
                 .build()
         )).collect(Collectors.toList());
 
-        assertEquals(groupMaxSize, group.size());
+        assertEquals(groupMaxSize, group.numMembers());
         assertEquals(groupMaxSize, group.numAwaitingJoinResponse());
         assertTrue(group.isInState(PREPARING_REBALANCE));
 
@@ -3867,14 +3869,14 @@ public class GroupMetadataManagerTest {
 
         verifyClassicGroupJoinResponses(joinResults, groupMaxSize, Errors.GROUP_MAX_SIZE_REACHED);
 
-        assertEquals(groupMaxSize, group.size());
+        assertEquals(groupMaxSize, group.numMembers());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
 
         memberIds.subList(groupMaxSize, groupMaxSize + 2)
-            .forEach(memberId -> assertFalse(group.hasMemberId(memberId)));
+            .forEach(memberId -> assertFalse(group.hasMember(memberId)));
 
         memberIds.subList(0, groupMaxSize)
-            .forEach(memberId -> assertTrue(group.hasMemberId(memberId)));
+            .forEach(memberId -> assertTrue(group.hasMember(memberId)));
     }
 
     @Test
@@ -4376,7 +4378,7 @@ public class GroupMetadataManagerTest {
         assertTrue(oldMemberJoinResult.records.isEmpty());
         assertFalse(oldMemberJoinResult.joinFuture.isDone());
         assertEquals(1, group.numAwaitingJoinResponse());
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
 
         // Replace static member with new member id. Old member id should be fenced.
         GroupMetadataManagerTestContext.JoinResult newMemberJoinResult = context.sendClassicGroupJoin(request);
@@ -4386,14 +4388,14 @@ public class GroupMetadataManagerTest {
         assertTrue(oldMemberJoinResult.joinFuture.isDone());
         assertEquals(Errors.FENCED_INSTANCE_ID.code(), oldMemberJoinResult.joinFuture.get().errorCode());
         assertEquals(1, group.numAwaitingJoinResponse());
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
 
         // Complete join for new member.
         GroupMetadataManagerTestContext.assertNoOrEmptyResult(context.sleep(context.classicGroupInitialRebalanceDelayMs));
         assertTrue(newMemberJoinResult.joinFuture.isDone());
         assertEquals(Errors.NONE.code(), newMemberJoinResult.joinFuture.get().errorCode());
         assertEquals(0, group.numAwaitingJoinResponse());
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
     }
 
     @Test
@@ -4414,7 +4416,7 @@ public class GroupMetadataManagerTest {
         assertTrue(joinResult.records.isEmpty());
         assertTrue(joinResult.joinFuture.isDone());
         assertEquals(Errors.MEMBER_ID_REQUIRED.code(), joinResult.joinFuture.get().errorCode());
-        assertEquals(0, group.size());
+        assertEquals(0, group.numMembers());
         assertEquals(1, group.numPendingJoinMembers());
 
         // Advance clock by session timeout. Pending member should be removed from group as heartbeat expires.
@@ -4440,7 +4442,7 @@ public class GroupMetadataManagerTest {
 
         assertTrue(joinResult.records.isEmpty());
         assertFalse(joinResult.joinFuture.isDone());
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
 
         String memberId = group.leaderOrNull();
         // Advance clock by new member join timeout. Member should be removed from group as heartbeat expires.
@@ -4458,7 +4460,7 @@ public class GroupMetadataManagerTest {
 
         assertTrue(joinResult.joinFuture.isDone());
         assertEquals(Errors.UNKNOWN_MEMBER_ID.code(), joinResult.joinFuture.get().errorCode());
-        assertEquals(0, group.size());
+        assertEquals(0, group.numMembers());
     }
 
     @Test
@@ -4477,7 +4479,7 @@ public class GroupMetadataManagerTest {
         assertEquals(Errors.NONE.code(), response.errorCode());
         String memberId = response.memberId();
 
-        assertTrue(group.hasMemberId(memberId));
+        assertTrue(group.hasMember(memberId));
 
         group.transitionTo(DEAD);
 
@@ -4628,7 +4630,7 @@ public class GroupMetadataManagerTest {
         assertEquals(Errors.NONE.code(), leaderJoinResult.joinFuture.get().errorCode());
         assertEquals(Errors.NONE.code(), memberJoinResult.joinFuture.get().errorCode());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
-        assertEquals(2, group.size());
+        assertEquals(2, group.numMembers());
         assertEquals(2, group.generationId());
 
         group.transitionTo(STABLE);
@@ -4656,7 +4658,7 @@ public class GroupMetadataManagerTest {
         assertEquals(Errors.NONE.code(), memberJoinResult.joinFuture.get().errorCode());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
         assertEquals(3, group.generationId());
-        assertEquals(2, group.size());
+        assertEquals(2, group.numMembers());
     }
 
     @Test
@@ -4689,7 +4691,7 @@ public class GroupMetadataManagerTest {
         assertTrue(leaderJoinResult.joinFuture.isDone());
         assertTrue(memberJoinResult.joinFuture.isDone());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
-        assertEquals(2, group.size());
+        assertEquals(2, group.numMembers());
         assertEquals(2, group.generationId());
 
         String memberId = memberJoinResult.joinFuture.get().memberId();
@@ -4760,7 +4762,7 @@ public class GroupMetadataManagerTest {
 
         assertTrue(memberJoinResult.records.isEmpty());
         assertFalse(memberJoinResult.joinFuture.isDone());
-        assertEquals(2, group.size());
+        assertEquals(2, group.numMembers());
         assertTrue(group.isInState(PREPARING_REBALANCE));
 
         // Advance clock by rebalance timeout. This will expire the leader as it has not rejoined.
@@ -4768,8 +4770,8 @@ public class GroupMetadataManagerTest {
 
         assertTrue(memberJoinResult.joinFuture.isDone());
         assertEquals(Errors.NONE.code(), memberJoinResult.joinFuture.get().errorCode());
-        assertEquals(1, group.size());
-        assertTrue(group.hasMemberId(memberJoinResult.joinFuture.get().memberId()));
+        assertEquals(1, group.numMembers());
+        assertTrue(group.hasMember(memberJoinResult.joinFuture.get().memberId()));
         assertEquals(2, group.generationId());
     }
 
@@ -4838,7 +4840,7 @@ public class GroupMetadataManagerTest {
         assertTrue(secondMemberJoinResult.joinFuture.isDone());
         assertEquals(Errors.NONE.code(), firstMemberJoinResult.joinFuture.get().errorCode());
         assertEquals(Errors.NONE.code(), secondMemberJoinResult.joinFuture.get().errorCode());
-        assertEquals(2, group.size());
+        assertEquals(2, group.numMembers());
         assertEquals(2, group.generationId());
 
         String secondMemberId = secondMemberJoinResult.joinFuture.get().memberId();
@@ -4846,7 +4848,7 @@ public class GroupMetadataManagerTest {
         // Trigger a rebalance. No members rejoined.
         context.groupMetadataManager.prepareRebalance(group, "trigger rebalance");
 
-        assertEquals(2, group.size());
+        assertEquals(2, group.numMembers());
         assertTrue(group.isInState(PREPARING_REBALANCE));
         assertEquals(0, group.numAwaitingJoinResponse());
 
@@ -4858,7 +4860,7 @@ public class GroupMetadataManagerTest {
         assertEquals(10000, context.timer.timeout("join-group-id").deadlineMs - context.time.milliseconds());
 
         assertTrue(group.isInState(PREPARING_REBALANCE));
-        assertEquals(2, group.size());
+        assertEquals(2, group.numMembers());
         assertEquals(2, group.generationId());
 
         // Let first and second member rejoin. This should complete the join phase.
@@ -4871,7 +4873,7 @@ public class GroupMetadataManagerTest {
         assertTrue(firstMemberJoinResult.records.isEmpty());
         assertFalse(firstMemberJoinResult.joinFuture.isDone());
         assertTrue(group.isInState(PREPARING_REBALANCE));
-        assertEquals(2, group.size());
+        assertEquals(2, group.numMembers());
         assertEquals(2, group.generationId());
 
         secondMemberJoinResult = context.sendClassicGroupJoin(
@@ -4886,7 +4888,7 @@ public class GroupMetadataManagerTest {
         assertEquals(Errors.NONE.code(), firstMemberJoinResult.joinFuture.get().errorCode());
         assertEquals(Errors.NONE.code(), secondMemberJoinResult.joinFuture.get().errorCode());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
-        assertEquals(2, group.size());
+        assertEquals(2, group.numMembers());
         assertEquals(3, group.generationId());
     }
 
@@ -4911,7 +4913,7 @@ public class GroupMetadataManagerTest {
         assertEquals(Errors.NONE.code(), response.errorCode());
         String oldMemberId = response.memberId();
 
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
         assertEquals(1, group.generationId());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
 
@@ -4972,7 +4974,7 @@ public class GroupMetadataManagerTest {
         assertEquals(4500, updatedMember.sessionTimeoutMs());
         assertEquals(protocols, updatedMember.supportedProtocols());
 
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
         assertEquals(1, group.generationId());
         assertTrue(group.isInState(STABLE));
     }
@@ -4993,7 +4995,7 @@ public class GroupMetadataManagerTest {
 
         JoinGroupResponseData response = context.joinClassicGroupAndCompleteJoin(request, true, true);
         assertEquals(Errors.NONE.code(), response.errorCode());
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
         assertEquals(1, group.generationId());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
 
@@ -5008,7 +5010,7 @@ public class GroupMetadataManagerTest {
         assertTrue(joinResult.records.isEmpty());
         assertTrue(joinResult.joinFuture.isDone());
         assertEquals(Errors.NONE.code(), joinResult.joinFuture.get().errorCode());
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
         assertEquals(2, group.generationId());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
     }
@@ -5034,7 +5036,7 @@ public class GroupMetadataManagerTest {
 
         JoinGroupResponseData response = context.joinClassicGroupAndCompleteJoin(request, false, false);
         assertEquals(Errors.NONE.code(), response.errorCode());
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
         assertEquals(1, group.generationId());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
 
@@ -5086,7 +5088,7 @@ public class GroupMetadataManagerTest {
         assertEquals(4000, revertedMember.rebalanceTimeoutMs());
         assertEquals(3000, revertedMember.sessionTimeoutMs());
         assertEquals(protocols, revertedMember.supportedProtocols());
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
         assertEquals(1, group.generationId());
         assertTrue(group.isInState(STABLE));
     }
@@ -5116,7 +5118,7 @@ public class GroupMetadataManagerTest {
         );
 
         assertEquals(Errors.NONE.code(), response.errorCode());
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
         assertEquals(1, group.generationId());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
 
@@ -5162,7 +5164,7 @@ public class GroupMetadataManagerTest {
         assertEquals(7000, newMember.rebalanceTimeoutMs());
         assertEquals(6000, newMember.sessionTimeoutMs());
         assertEquals(GroupMetadataManagerTestContext.toProtocols("range", "roundrobin"), newMember.supportedProtocols());
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
         assertEquals(1, group.generationId());
         assertTrue(group.isInState(STABLE));
     }
@@ -5183,7 +5185,7 @@ public class GroupMetadataManagerTest {
         JoinGroupResponseData response = context.joinClassicGroupAndCompleteJoin(request, true, true);
         assertEquals(Errors.NONE.code(), response.errorCode());
 
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
         assertEquals(1, group.generationId());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
 
@@ -5193,7 +5195,7 @@ public class GroupMetadataManagerTest {
         assertTrue(joinResult.records.isEmpty());
         assertTrue(joinResult.joinFuture.isDone());
         assertEquals(Errors.NONE.code(), joinResult.joinFuture.get().errorCode());
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
         assertEquals(2, group.generationId());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
     }
@@ -5255,11 +5257,11 @@ public class GroupMetadataManagerTest {
 
         assertTrue(syncResult.syncFuture.isDone());
         assertEquals(Errors.NONE.code(), syncResult.syncFuture.get().errorCode());
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
 
         // Make sure the NewMemberTimeout is not still in effect, and the member is not kicked
         GroupMetadataManagerTestContext.assertNoOrEmptyResult(context.sleep(context.classicGroupNewMemberJoinTimeoutMs));
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
 
         // Member should be removed as heartbeat expires. The group is now empty.
         List<ExpiredTimeout<Void, CoordinatorRecord>> timeouts = context.sleep(5000);
@@ -5282,7 +5284,7 @@ public class GroupMetadataManagerTest {
             assertEquals(expectedRecords, timeout.result.records());
         });
 
-        assertEquals(0, group.size());
+        assertEquals(0, group.numMembers());
         assertTrue(group.isInState(EMPTY));
     }
 
@@ -5519,8 +5521,8 @@ public class GroupMetadataManagerTest {
         assertTrue(duplicateFollowerJoinResult.joinFuture.isDone());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
         assertEquals(3, group.generationId());
-        assertEquals(1, group.size());
-        assertTrue(group.hasMemberId(duplicateFollowerJoinResult.joinFuture.get().memberId()));
+        assertEquals(1, group.numMembers());
+        assertTrue(group.hasMember(duplicateFollowerJoinResult.joinFuture.get().memberId()));
         assertEquals(duplicateFollowerJoinResult.joinFuture.get().memberId(), duplicateFollowerJoinResult.joinFuture.get().leader());
     }
 
@@ -5790,7 +5792,7 @@ public class GroupMetadataManagerTest {
         JoinGroupResponseData joinResponse = context.joinClassicGroupAndCompleteJoin(request, true, true, 10000);
 
         // Follower's heartbeat expires as the leader rejoins.
-        assertFalse(group.hasMemberId(rebalanceResult.followerId));
+        assertFalse(group.hasMember(rebalanceResult.followerId));
 
         JoinGroupResponseData expectedResponse = new JoinGroupResponseData()
             .setErrorCode(Errors.NONE.code())
@@ -7150,8 +7152,8 @@ public class GroupMetadataManagerTest {
 
         assertTrue(followerSyncResult.syncFuture.isDone());
         assertEquals(Errors.REBALANCE_IN_PROGRESS.code(), followerSyncResult.syncFuture.get().errorCode());
-        assertEquals(1, group.size());
-        assertTrue(group.hasMemberId(followerId));
+        assertEquals(1, group.numMembers());
+        assertTrue(group.hasMember(followerId));
         assertTrue(group.isInState(PREPARING_REBALANCE));
     }
 
@@ -7707,7 +7709,7 @@ public class GroupMetadataManagerTest {
 
         assertTrue(otherJoinResult.joinFuture.isDone());
         assertEquals(Errors.NONE.code(), otherJoinResult.joinFuture.get().errorCode());
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
         assertEquals(2, group.generationId());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
     }
@@ -7783,7 +7785,7 @@ public class GroupMetadataManagerTest {
 
         assertTrue(secondMemberJoinResult.joinFuture.isDone());
         assertEquals(Errors.NONE.code(), secondMemberJoinResult.joinFuture.get().errorCode());
-        assertEquals(2, group.size());
+        assertEquals(2, group.numMembers());
         assertEquals(2, group.generationId());
         assertTrue(group.isInState(COMPLETING_REBALANCE));
 
@@ -7818,7 +7820,7 @@ public class GroupMetadataManagerTest {
 
             assertEquals(expectedError.code(), heartbeatResponse.errorCode());
         }
-        assertEquals(1, group.size());
+        assertEquals(1, group.numMembers());
         assertTrue(group.isInState(PREPARING_REBALANCE));
 
         GroupMetadataManagerTestContext.JoinResult otherMemberRejoinResult = context.sendClassicGroupJoin(
@@ -7949,8 +7951,8 @@ public class GroupMetadataManagerTest {
 
         // At this point the second member should have been removed from pending list (session timeout),
         // and the group should be in Stable state with only the first member in it.
-        assertEquals(1, group.size());
-        assertTrue(group.hasMemberId(firstMemberId));
+        assertEquals(1, group.numMembers());
+        assertTrue(group.hasMember(firstMemberId));
         assertEquals(1, group.generationId());
         assertTrue(group.isInState(STABLE));
     }
@@ -9233,7 +9235,7 @@ public class GroupMetadataManagerTest {
             .build();
 
         assignor.prepareGroupAssignment(new GroupAssignment(
-            Collections.singletonMap(memberId, new MemberAssignment(mkAssignment(
+            Collections.singletonMap(memberId, new MemberAssignmentImpl(mkAssignment(
                 mkTopicAssignment(fooTopicId, 0, 1, 2, 3, 4, 5),
                 mkTopicAssignment(barTopicId, 0, 1, 2)
             )))
@@ -9476,10 +9478,10 @@ public class GroupMetadataManagerTest {
         assignor.prepareGroupAssignment(new GroupAssignment(
             new HashMap<String, MemberAssignment>() {
                 {
-                    put(memberId1, new MemberAssignment(mkAssignment(
+                    put(memberId1, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 0)
                     )));
-                    put(memberId2, new MemberAssignment(mkAssignment(
+                    put(memberId2, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(barTopicId, 0)
                     )));
                 }
@@ -9629,7 +9631,7 @@ public class GroupMetadataManagerTest {
 
         assertRecordsEquals(expectedRecords, result.records());
 
-        context.assertSessionTimeout(groupId, memberId1, 45000);
+        context.assertSessionTimeout(groupId, memberId1, expectedMember1.classicProtocolSessionTimeout().get());
         context.assertSessionTimeout(groupId, memberId2, 45000);
 
         // Simulate a failed replay. The context is rolled back and the group is converted back to the classic group.
@@ -9652,13 +9654,13 @@ public class GroupMetadataManagerTest {
         assignor.prepareGroupAssignment(new GroupAssignment(
             new HashMap<String, MemberAssignment>() {
                 {
-                    put(memberId1, new MemberAssignment(mkAssignment(
+                    put(memberId1, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 0)
                     )));
-                    put(memberId2, new MemberAssignment(mkAssignment(
+                    put(memberId2, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(barTopicId, 0)
                     )));
-                    put(memberId3, new MemberAssignment(mkAssignment(
+                    put(memberId3, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 1)
                     )));
                 }
@@ -9875,8 +9877,8 @@ public class GroupMetadataManagerTest {
         assertTrue(joinResult.joinFuture.isDone());
         assertEquals(Errors.REBALANCE_IN_PROGRESS.code(), joinResult.joinFuture.get().errorCode());
 
-        context.assertSessionTimeout(groupId, memberId1, 45000);
-        context.assertSessionTimeout(groupId, memberId2, 45000);
+        context.assertSessionTimeout(groupId, memberId1, expectedMember1.classicProtocolSessionTimeout().get());
+        context.assertSessionTimeout(groupId, memberId2, expectedMember2.classicProtocolSessionTimeout().get());
         context.assertSessionTimeout(groupId, memberId3, 45000);
 
         // Simulate a failed replay. The context is rolled back and the group is converted back to the classic group.
@@ -9899,13 +9901,13 @@ public class GroupMetadataManagerTest {
         assignor.prepareGroupAssignment(new GroupAssignment(
             new HashMap<String, MemberAssignment>() {
                 {
-                    put(memberId1, new MemberAssignment(mkAssignment(
+                    put(memberId1, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 0)
                     )));
-                    put(memberId2, new MemberAssignment(mkAssignment(
+                    put(memberId2, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(barTopicId, 0)
                     )));
-                    put(memberId3, new MemberAssignment(mkAssignment(
+                    put(memberId3, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 1)
                     )));
                 }
@@ -10140,8 +10142,8 @@ public class GroupMetadataManagerTest {
         assertTrue(syncResult.syncFuture.isDone());
         assertEquals(Errors.REBALANCE_IN_PROGRESS.code(), syncResult.syncFuture.get().errorCode());
 
-        context.assertSessionTimeout(groupId, memberId1, 45000);
-        context.assertSessionTimeout(groupId, memberId2, 45000);
+        context.assertSessionTimeout(groupId, memberId1, expectedMember1.classicProtocolSessionTimeout().get());
+        context.assertSessionTimeout(groupId, memberId2, expectedMember2.classicProtocolSessionTimeout().get());
         context.assertSessionTimeout(groupId, memberId3, 45000);
 
         // Simulate a failed replay. The context is rolled back and the group is converted back to the classic group.
@@ -10171,7 +10173,7 @@ public class GroupMetadataManagerTest {
         assertFalse(joinResult1.joinFuture.isDone());
         assertFalse(joinResult2.joinFuture.isDone());
         assertTrue(preparingGroup.isInState(PREPARING_REBALANCE));
-        assertEquals(2, preparingGroup.size());
+        assertEquals(2, preparingGroup.numMembers());
 
         context.onUnloaded();
 
@@ -10730,11 +10732,11 @@ public class GroupMetadataManagerTest {
         assignor.prepareGroupAssignment(new GroupAssignment(
             new HashMap<String, MemberAssignment>() {
                 {
-                    put(memberId1, new MemberAssignment(mkAssignment(
+                    put(memberId1, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 0, 1, 2),
                         mkTopicAssignment(barTopicId, 0, 1)
                     )));
-                    put(memberId2, new MemberAssignment(mkAssignment(
+                    put(memberId2, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 3, 4, 5)
                     )));
                 }
@@ -10970,10 +10972,10 @@ public class GroupMetadataManagerTest {
             assignor.prepareGroupAssignment(new GroupAssignment(
                 new HashMap<String, MemberAssignment>() {
                     {
-                        put(memberId, new MemberAssignment(mkAssignment(
+                        put(memberId, new MemberAssignmentImpl(mkAssignment(
                             mkTopicAssignment(fooTopicId, 0)
                         )));
-                        put(newMemberId, new MemberAssignment(mkAssignment(
+                        put(newMemberId, new MemberAssignmentImpl(mkAssignment(
                             mkTopicAssignment(barTopicId, 0)
                         )));
                     }
@@ -11059,10 +11061,10 @@ public class GroupMetadataManagerTest {
         assignor.prepareGroupAssignment(new GroupAssignment(
             new HashMap<String, MemberAssignment>() {
                 {
-                    put(memberId, new MemberAssignment(mkAssignment(
+                    put(memberId, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 0)
                     )));
-                    put(newMemberId, new MemberAssignment(mkAssignment(
+                    put(newMemberId, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 1)
                     )));
                 }
@@ -11389,11 +11391,11 @@ public class GroupMetadataManagerTest {
         assignor.prepareGroupAssignment(new GroupAssignment(
             new HashMap<String, MemberAssignment>() {
                 {
-                    put(memberId1, new MemberAssignment(mkAssignment(
+                    put(memberId1, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 0),
                         mkTopicAssignment(zarTopicId, 0)
                     )));
-                    put(memberId2, new MemberAssignment(mkAssignment(
+                    put(memberId2, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(barTopicId, 0),
                         mkTopicAssignment(fooTopicId, 1)
                     )));
@@ -11619,11 +11621,11 @@ public class GroupMetadataManagerTest {
         assignor.prepareGroupAssignment(new GroupAssignment(
             new HashMap<String, MemberAssignment>() {
                 {
-                    put(memberId1, new MemberAssignment(mkAssignment(
+                    put(memberId1, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 0, 1),
                         mkTopicAssignment(zarTopicId, 0)
                     )));
-                    put(memberId2, new MemberAssignment(mkAssignment(
+                    put(memberId2, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(barTopicId, 0)
                     )));
                 }
@@ -11861,11 +11863,11 @@ public class GroupMetadataManagerTest {
         assignor.prepareGroupAssignment(new GroupAssignment(
             new HashMap<String, MemberAssignment>() {
                 {
-                    put(memberId1, new MemberAssignment(mkAssignment(
+                    put(memberId1, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(fooTopicId, 0, 1),
                         mkTopicAssignment(zarTopicId, 0)
                     )));
-                    put(memberId2, new MemberAssignment(mkAssignment(
+                    put(memberId2, new MemberAssignmentImpl(mkAssignment(
                         mkTopicAssignment(barTopicId, 0)
                     )));
                 }

@@ -48,6 +48,7 @@ import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
 import org.apache.kafka.streams.processor.internals.metrics.TaskMetrics;
 import org.apache.kafka.streams.processor.internals.metrics.TopicMetrics;
+
 import org.slf4j.Logger;
 
 import java.util.Collections;
@@ -61,7 +62,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.apache.kafka.streams.processor.internals.ClientUtils.producerRecordSizeInBytes;
 
 public class RecordCollectorImpl implements RecordCollector {
-    private final static String SEND_EXCEPTION_MESSAGE = "Error encountered sending record to topic %s for task %s due to:%n%s";
+    private static final String SEND_EXCEPTION_MESSAGE = "Error encountered sending record to topic %s for task %s due to:%n%s";
 
     private final Logger log;
     private final TaskId taskId;
@@ -74,7 +75,7 @@ public class RecordCollectorImpl implements RecordCollector {
     private final Sensor droppedRecordsSensor;
     private final Map<String, Sensor> producedSensorByTopic = new HashMap<>();
 
-    private final AtomicReference<KafkaException> sendException = new AtomicReference<>(null);
+    private final AtomicReference<KafkaException> sendException;
 
     /**
      * @throws StreamsException fatal error that should cause the thread to die (from producer.initTxn)
@@ -88,6 +89,7 @@ public class RecordCollectorImpl implements RecordCollector {
         this.log = logContext.logger(getClass());
         this.taskId = taskId;
         this.streamsProducer = streamsProducer;
+        this.sendException = streamsProducer.sendException();
         this.productionExceptionHandler = productionExceptionHandler;
         this.eosEnabled = streamsProducer.eosEnabled();
         this.streamsMetrics = streamsMetrics;

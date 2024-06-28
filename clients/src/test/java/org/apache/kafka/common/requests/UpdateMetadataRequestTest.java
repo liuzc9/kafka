@@ -29,6 +29,7 @@ import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.test.TestUtils;
+
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
@@ -73,7 +74,7 @@ public class UpdateMetadataRequestTest {
 
     /**
      * Verifies the logic we have in UpdateMetadataRequest to present a unified interface across the various versions
-     * works correctly. For example, `UpdateMetadataPartitionState.topicName` is not serialiazed/deserialized in
+     * works correctly. For example, `UpdateMetadataPartitionState.topicName` is not serialized/deserialized in
      * recent versions, but we set it manually so that we can always present the ungrouped partition states
      * independently of the version.
      */
